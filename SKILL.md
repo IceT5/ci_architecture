@@ -19,30 +19,32 @@ Analyzes GitHub Actions CI/CD architecture with a **separation of concerns**:
 │                    DATA EXTRACTION (Python)                             │
 │  ci_data_extractor.py                                                   │
 │  • Scans CI directories                                                 │
-│  • Extracts raw workflow/action/script data                            │
+│  • Extracts workflow/job/step details                                   │
 │  • Builds relationship graphs                                           │
-│  • Outputs JSON (no classification decisions)                          │
+│  • Maps scripts to directories                                          │
+│  • Outputs comprehensive JSON                                           │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ JSON
+                                    │ JSON (raw_data.json)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    LLM ANALYSIS                                         │
-│  • Understands project context                                          │
-│  • Creates categories based on project patterns                         │
-│  • Classifies workflows by actual purpose                              │
-│  • Analyzes scripts semantics                                           │
+│  • Receives detailed prompt with all extracted data                     │
+│  • Creates functional categories (PR CI, Build, Test, etc.)            │
+│  • Classifies workflows by purpose                                      │
+│  • Identifies key configs and parameters                                │
+│  • Maps scripts to categories                                           │
 │  • Returns structured JSON analysis                                     │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ JSON
+                                    │ JSON (llm_response.json)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    DIAGRAM GENERATION (Python)                          │
 │  ci_diagram_generator.py                                                │
-│  • Receives raw data + LLM analysis                                    │
-│  • Generates ASCII architecture diagram                                │
-│  • Categories are LLM-defined, dynamic                                 │
+│  • Merges raw data with LLM analysis                                    │
+│  • Generates Markdown architecture document                             │
+│  • Shows categories with scripts, jobs, configs                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -50,8 +52,8 @@ Analyzes GitHub Actions CI/CD architecture with a **separation of concerns**:
 
 | File | Purpose |
 |------|---------|
-| `ci_data_extractor.py` | Pure data extraction - no classification logic |
-| `ci_diagram_generator.py` | Generates diagrams from raw data + LLM analysis |
+| `ci_data_extractor.py` | Comprehensive data extraction - workflows, jobs, steps, actions, scripts |
+| `ci_diagram_generator.py` | Generates LLM prompts and architecture diagrams |
 | `analyze_ci_architecture.py` | Legacy: standalone analyzer with hardcoded rules |
 
 ## Usage
@@ -63,10 +65,12 @@ python ci_data_extractor.py /path/to/repo ci_data.json
 ```
 
 This outputs `ci_data.json` containing:
-- All workflow configurations (triggers, jobs, steps)
-- All composite actions
-- All CI scripts with previews
-- Relationship graphs (workflow calls, job dependencies, action usages)
+- All workflow configurations with full job/step details
+- Matrix configurations and parameters
+- All composite actions with inputs/outputs
+- All CI scripts with function analysis
+- Relationship graphs (workflow calls, action usages)
+- Scripts organized by directory
 
 ### Step 2: Generate LLM Prompt
 
@@ -74,73 +78,78 @@ This outputs `ci_data.json` containing:
 python ci_diagram_generator.py prompt ci_data.json
 ```
 
-This generates a prompt for the LLM. Send this prompt to the LLM and save the response.
+This generates a detailed prompt for the LLM including:
+- Repository structure
+- All workflows with jobs, steps, triggers
+- Matrix configurations
+- Actions and their relationships
+- Scripts and their functions
 
-### Step 3: Generate Architecture Diagram
+### Step 3: Send Prompt to LLM
+
+Copy the prompt and send to the LLM. The LLM will return a JSON analysis with:
+- **Categories**: Functional groupings (PR CI, Build, Test, etc.)
+- **Workflow Classifications**: Purpose, importance, key jobs
+- **Job Classifications**: Key steps, config params
+- **Script Classifications**: Purpose, related workflows
+- **Architecture Summary**: Project type, CI philosophy, patterns
+
+Save the LLM response as `llm_response.json`.
+
+### Step 4: Generate Architecture Diagram
 
 ```bash
 python ci_diagram_generator.py diagram ci_data.json llm_response.json CI_ARCHITECTURE.md
 ```
 
-## What Gets Extracted vs Analyzed
+## Output Format
 
-### Extracted by Python (no understanding required)
-- File listings and directory structure
-- YAML parsing results (triggers, jobs, steps)
-- Raw relationships (which workflow calls which)
-- Job dependency graphs
-- Script content previews
+The generated architecture document includes:
 
-### Analyzed by LLM (requires understanding)
-- **Workflow categories**: LLM creates categories based on what workflows actually do
-- **Workflow purposes**: What each workflow is for
-- **Action classifications**: How to group actions
-- **Script purposes**: What scripts do
-- **Project type**: What kind of project this is
-- **CI philosophy**: The approach/patterns used
-- **Recommendations**: Improvement suggestions
+### For Each Category:
+- **Description**: What this category accomplishes
+- **Script Directory**: Where related scripts are located
+- **Workflows**: List of workflows with:
+  - Purpose and importance
+  - Triggers
+  - Jobs with key steps
+  - Config parameters (matrix, with_params)
+- **Related Scripts**: Scripts in this category
+- **Related Actions**: Composite actions used
 
-## LLM Response Format
+### Summary Statistics:
+- Total workflows, jobs, actions, scripts
+- Key patterns identified
+- Recommendations
 
-The LLM should return JSON in this format:
+## LLM Prompt Guidelines
 
-```json
-{
-  "workflow_categories": [
-    {
-      "name": "pull_validation",
-      "display_name": "Pull Request Validation",
-      "description": "Validates PRs before merge",
-      "icon": "🔄"
-    }
-  ],
-  "workflow_classifications": {
-    "pull.yml": {
-      "category": "pull_validation",
-      "purpose": "Runs tests and checks on pull requests",
-      "importance": "primary"
-    }
-  },
-  "project_type": "Python Library",
-  "ci_philosophy": "GitHub Flow with comprehensive PR validation",
-  "architecture_summary": "This project uses...",
-  "key_patterns": ["Reusable workflows for DRY", "Matrix for multi-platform"],
-  "recommendations": ["Consider adding caching"]
-}
-```
+The prompt instructs the LLM to:
 
-## Benefits of This Architecture
+1. **Create functional categories** based on purpose, not names
+2. **Classify everything**: Every workflow, job, action, script
+3. **Include directory mappings**: Link categories to script directories
+4. **Show config details**: Matrix configs, parameters, inputs
+5. **Provide summaries**: Purpose and description for each item
 
-1. **Truly Generic**: No hardcoded patterns that fail on different naming conventions
-2. **Adaptive**: LLM creates categories based on what exists in the project
-3. **Intelligent Understanding**: LLM explains what workflows do, not just their names
-4. **Project Context**: LLM understands the type of project and its CI philosophy
-5. **Maintainable**: No need to update code for new patterns - LLM adapts automatically
+## Common Categories
+
+| Category | Description | Typical Workflows |
+|----------|-------------|-------------------|
+| Pull Request CI | PR validation | `pull.yml`, `lint.yml` |
+| Trunk/Post-Merge | After merge testing | `trunk.yml` |
+| Scheduled CI | Periodic testing | `periodic.yml`, `nightly.yml` |
+| Build Pipelines | Compilation | `*-build.yml` |
+| Testing | Test suites | `*-test.yml`, `inductor.yml` |
+| Binary/Release | Artifacts | `generated-*-binary-*.yml` |
+| Linting | Code quality | `lint.yml` |
+| Documentation | Docs | `docs.yml` |
+| Utility | Helpers | `trymerge.yml`, `revert.yml` |
 
 ## Example Workflow
 
 ```bash
-# 1. Extract data
+# 1. Extract data from a project
 python ci_data_extractor.py /path/to/pytorch ci_data.json
 
 # 2. Generate prompt
@@ -150,17 +159,10 @@ python ci_diagram_generator.py prompt ci_data.json > prompt.txt
 
 # 4. Generate diagram
 python ci_diagram_generator.py diagram ci_data.json analysis.json CI_ARCHITECTURE.md
+
+# 5. View the result
+cat CI_ARCHITECTURE.md
 ```
-
-## Legacy Mode
-
-The original `analyze_ci_architecture.py` still works as a standalone tool:
-
-```bash
-python analyze_ci_architecture.py /path/to/repo
-```
-
-This uses hardcoded classification rules and works well for projects following common conventions.
 
 ## Requirements
 
@@ -169,3 +171,44 @@ This uses hardcoded classification rules and works well for projects following c
 
 ```bash
 pip install pyyaml
+```
+
+## What Gets Extracted
+
+### Workflows
+- Name, path, triggers
+- Environment variables
+- Concurrency settings
+- All jobs with:
+  - runs-on, needs, if conditions
+  - Steps with name, uses, run, with_params
+  - Matrix configurations (expanded)
+  - with_params for reusable workflows
+  - Outputs
+
+### Actions
+- Description
+- Inputs (name, description, required, default)
+- Outputs
+- Steps called
+- Used by which workflows
+
+### Scripts
+- Path and type (.py, .sh, etc.)
+- Functions (extracted)
+- Imports (for Python)
+- Called by which jobs
+
+### Relationships
+- Workflow call graph (who calls whom)
+- Job dependency graph
+- Action usage graph
+
+## Benefits of This Architecture
+
+1. **Comprehensive**: Extracts all details - steps, configs, parameters
+2. **Directory Mapping**: Shows which scripts relate to which categories
+3. **Config Details**: Displays matrix configs, with_params, etc.
+4. **Flexible Categories**: LLM creates categories based on actual project
+5. **Intelligent Analysis**: LLM understands purpose and relationships
+6. **Maintainable**: No hardcoded patterns - LLM adapts automatically

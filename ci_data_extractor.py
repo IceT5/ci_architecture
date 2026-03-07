@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-CI Data Extractor - Extract raw CI/CD data without classification
+CI Data Extractor - Extract comprehensive raw CI/CD data without classification
 
-This module only extracts raw data from CI/CD configurations.
+This module extracts detailed raw data from CI/CD configurations.
 All classification and understanding should be done by LLM.
 """
 
@@ -18,16 +18,35 @@ import sys
 
 
 @dataclass
+class StepData:
+    """Detailed step data."""
+    name: str = ""
+    id: str = ""
+    uses: str = ""
+    run: str = ""
+    with_params: Dict[str, Any] = field(default_factory=dict)
+    env: Dict[str, str] = field(default_factory=dict)
+    if_condition: str = ""
+    continue_on_error: bool = False
+    timeout_minutes: int = 0
+
+
+@dataclass
 class JobData:
-    """Raw job data extracted from workflow."""
+    """Detailed job data extracted from workflow."""
     name: str
+    display_name: str = ""
     runs_on: str = ""
     needs: List[str] = field(default_factory=list)
-    uses: str = ""
-    steps: List[Dict] = field(default_factory=list)
+    uses: str = ""  # For reusable workflow calls
+    with_params: Dict[str, Any] = field(default_factory=dict)  # Inputs for reusable workflow
+    steps: List[StepData] = field(default_factory=list)
     if_condition: str = ""
     matrix: Optional[Dict] = None
-    env_vars: List[str] = field(default_factory=list)
+    matrix_configs: List[Dict[str, Any]] = field(default_factory=list)  # Expanded matrix configs
+    env_vars: Dict[str, str] = field(default_factory=dict)
+    outputs: Dict[str, str] = field(default_factory=dict)
+    timeout_minutes: int = 0
     # Extracted relationships
     calls_workflows: List[str] = field(default_factory=list)
     calls_actions: List[str] = field(default_factory=list)
@@ -35,38 +54,44 @@ class JobData:
 
 @dataclass
 class WorkflowData:
-    """Raw workflow data without classification."""
+    """Detailed workflow data without classification."""
     filename: str
     name: str
+    path: str
     triggers: List[str] = field(default_factory=list)
+    trigger_details: Dict[str, Any] = field(default_factory=dict)  # Detailed trigger config
     jobs: Dict[str, JobData] = field(default_factory=dict)
-    raw_content_summary: str = ""  # First N lines for LLM context
+    env_vars: Dict[str, str] = field(default_factory=dict)
+    concurrency: Dict[str, str] = field(default_factory=dict)
+    raw_content: str = ""  # Full content for LLM context
     # Relationships
     callers: List[str] = field(default_factory=list)  # Who calls this workflow
 
 
 @dataclass
 class ActionData:
-    """Raw composite action data."""
+    """Detailed composite action data."""
     name: str
     path: str
     description: str = ""
-    inputs: List[str] = field(default_factory=list)
-    outputs: List[str] = field(default_factory=list)
-    runs_steps: List[Dict] = field(default_factory=list)
+    inputs: Dict[str, Dict] = field(default_factory=dict)  # name -> {description, required, default}
+    outputs: Dict[str, Dict] = field(default_factory=dict)
+    runs_steps: List[StepData] = field(default_factory=list)
+    runs_using: str = ""  # composite, docker, node
     called_actions: List[str] = field(default_factory=list)
     used_by: List[str] = field(default_factory=list)
 
 
 @dataclass
 class ScriptData:
-    """Raw script data."""
+    """Detailed script data."""
     name: str
     path: str
     type: str  # .py, .sh, .ps1, .bat
-    content_preview: str = ""  # First 50 lines for LLM analysis
+    content: str = ""  # Full content for LLM analysis
     functions: List[str] = field(default_factory=list)
     imports: List[str] = field(default_factory=list)
+    called_by: List[str] = field(default_factory=list)  # Which workflows use this
 
 
 @dataclass
@@ -83,10 +108,12 @@ class CIData:
     action_usage_graph: Dict[str, List[str]] = field(default_factory=dict)
     # Metadata
     ci_directories: List[str] = field(default_factory=list)
+    # Scripts directory mapping
+    scripts_by_directory: Dict[str, List[str]] = field(default_factory=dict)
 
 
 class CIDataExtractor:
-    """Extract raw CI/CD data without making classification decisions."""
+    """Extract comprehensive raw CI/CD data without making classification decisions."""
     
     def __init__(self, repo_path: str):
         self.repo_path = Path(repo_path).resolve()
@@ -124,8 +151,8 @@ class CIDataExtractor:
                     if action_data:
                         data.actions.append(action_data)
         
-        # Extract scripts
-        data.scripts = self._extract_scripts(ci_dirs)
+        # Extract scripts with directory mapping
+        data.scripts, data.scripts_by_directory = self._extract_scripts(ci_dirs)
         
         # Build relationship graphs
         self._build_relationships(data)
@@ -135,26 +162,27 @@ class CIDataExtractor:
     def _find_ci_directories(self) -> Dict[str, Path]:
         """Find all CI-related directories."""
         patterns = [
-            ".github/workflows",
-            ".github/actions",
-            ".ci",
-            ".circleci",
-            "ci",
-            "scripts",
-            "test",
-            "tests",
+            (".github/workflows", "github_workflows"),
+            (".github/actions", "github_actions"),
+            (".github/scripts", "github_scripts"),
+            (".ci", "ci_dir"),
+            (".circleci", "circleci"),
+            ("ci", "ci_root"),
+            ("scripts", "scripts"),
+            ("test", "test"),
+            ("tests", "tests"),
         ]
         
         found = {}
-        for pattern in patterns:
+        for pattern, key in patterns:
             path = self.repo_path / pattern
             if path.exists():
-                found[pattern.replace("/", "_").replace(".", "")] = path
+                found[key] = path
         
         return found
     
     def _extract_workflow(self, filepath: Path) -> Optional[WorkflowData]:
-        """Extract raw workflow data from YAML file."""
+        """Extract detailed workflow data from YAML file."""
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -167,30 +195,39 @@ class CIDataExtractor:
             if True in wf_data and "on" not in wf_data:
                 wf_data["on"] = wf_data.pop(True)
             
-            # Extract triggers
-            triggers = self._extract_triggers(wf_data)
+            # Extract triggers with details
+            triggers, trigger_details = self._extract_triggers(wf_data)
             
-            # Extract jobs
+            # Extract jobs with full details
             jobs = self._extract_jobs(wf_data, filepath.name)
             
-            # Get content summary (first 100 lines for context)
-            lines = content.split("\n")[:100]
-            content_summary = "\n".join(lines)
+            # Extract workflow-level env
+            env_vars = wf_data.get("env", {}) or {}
+            
+            # Extract concurrency config
+            concurrency = wf_data.get("concurrency", {}) or {}
+            if isinstance(concurrency, str):
+                concurrency = {"group": concurrency}
             
             return WorkflowData(
                 filename=filepath.name,
                 name=wf_data.get("name", filepath.stem),
+                path=str(filepath.relative_to(self.repo_path)),
                 triggers=triggers,
+                trigger_details=trigger_details,
                 jobs=jobs,
-                raw_content_summary=content_summary
+                env_vars=env_vars if isinstance(env_vars, dict) else {},
+                concurrency=concurrency if isinstance(concurrency, dict) else {},
+                raw_content=content
             )
         except Exception as e:
             print(f"Error parsing {filepath}: {e}", file=sys.stderr)
             return None
     
-    def _extract_triggers(self, wf_data: Dict) -> List[str]:
-        """Extract trigger events."""
+    def _extract_triggers(self, wf_data: Dict) -> Tuple[List[str], Dict]:
+        """Extract trigger events with details."""
         triggers = []
+        trigger_details = {}
         on_config = wf_data.get("on", {})
         
         if isinstance(on_config, str):
@@ -199,57 +236,55 @@ class CIDataExtractor:
             triggers = on_config
         elif isinstance(on_config, dict):
             triggers = list(on_config.keys())
+            trigger_details = on_config
         
-        return triggers
+        return triggers, trigger_details
     
     def _extract_jobs(self, wf_data: Dict, workflow_name: str) -> Dict[str, JobData]:
-        """Extract raw job data."""
+        """Extract detailed job data."""
         jobs = {}
         
         for job_name, job_data in (wf_data.get("jobs", {}) or {}).items():
             if not isinstance(job_data, dict):
                 continue
             
-            # Extract steps
-            steps = []
-            for step in job_data.get("steps", []):
-                if isinstance(step, dict):
-                    steps.append({
-                        "name": step.get("name", ""),
-                        "uses": step.get("uses", ""),
-                        "run": step.get("run", ""),
-                        "with": step.get("with", {}),
-                        "env": step.get("env", {}),
-                    })
+            # Extract steps with full details
+            steps = self._extract_steps(job_data.get("steps", []))
             
-            # Extract matrix
+            # Extract matrix with expanded configs
             matrix = None
+            matrix_configs = []
             strategy = job_data.get("strategy", {})
             if isinstance(strategy, dict):
                 matrix = strategy.get("matrix")
+                if matrix:
+                    matrix_configs = self._expand_matrix(matrix)
             
             # Extract environment variables
-            env = job_data.get("env", {})
-            env_vars = list(env.keys()) if isinstance(env, dict) else []
+            env = job_data.get("env", {}) or {}
+            env_vars = env if isinstance(env, dict) else {}
+            
+            # Extract outputs
+            outputs = job_data.get("outputs", {}) or {}
             
             # Extract needs (dependencies)
             needs = job_data.get("needs", [])
             if isinstance(needs, str):
                 needs = [needs]
             
-            # Extract uses (for reusable workflows)
+            # Extract uses (for reusable workflows) with parameters
             uses = job_data.get("uses", "")
+            with_params = job_data.get("with", {}) or {}
             
             # Find calls in this job
             calls_workflows = []
             calls_actions = []
             
             if uses:
-                if "./.github/workflows/" in uses or "uses" in uses:
-                    calls_workflows.append(uses)
+                calls_workflows.append(uses)
             
             for step in steps:
-                step_uses = step.get("uses", "")
+                step_uses = step.uses
                 if step_uses:
                     if step_uses.startswith("./.github/actions/"):
                         action_name = step_uses.replace("./.github/actions/", "").split("/")[0]
@@ -259,23 +294,85 @@ class CIDataExtractor:
                     elif "/" in step_uses and not step_uses.startswith("./"):
                         calls_actions.append(step_uses)
             
+            # Extract display name
+            display_name = job_data.get("name", job_name)
+            
             jobs[job_name] = JobData(
                 name=job_name,
+                display_name=display_name,
                 runs_on=job_data.get("runs-on", ""),
                 needs=needs,
                 uses=uses,
+                with_params=with_params if isinstance(with_params, dict) else {},
                 steps=steps,
-                if_condition=job_data.get("if", ""),
+                if_condition=str(job_data.get("if", "")),
                 matrix=matrix,
+                matrix_configs=matrix_configs,
                 env_vars=env_vars,
+                outputs=outputs if isinstance(outputs, dict) else {},
+                timeout_minutes=job_data.get("timeout-minutes", 0),
                 calls_workflows=calls_workflows,
                 calls_actions=calls_actions
             )
         
         return jobs
     
+    def _extract_steps(self, steps_data: List) -> List[StepData]:
+        """Extract detailed step data."""
+        steps = []
+        for step in steps_data:
+            if not isinstance(step, dict):
+                continue
+            
+            with_params = step.get("with", {}) or {}
+            env = step.get("env", {}) or {}
+            
+            steps.append(StepData(
+                name=step.get("name", ""),
+                id=step.get("id", ""),
+                uses=step.get("uses", ""),
+                run=step.get("run", ""),
+                with_params=with_params if isinstance(with_params, dict) else {},
+                env=env if isinstance(env, dict) else {},
+                if_condition=str(step.get("if", "")),
+                continue_on_error=step.get("continue-on-error", False),
+                timeout_minutes=step.get("timeout-minutes", 0)
+            ))
+        
+        return steps
+    
+    def _expand_matrix(self, matrix: Dict) -> List[Dict[str, Any]]:
+        """Expand matrix to list of configurations."""
+        configs = []
+        
+        if not isinstance(matrix, dict):
+            return configs
+        
+        # Handle include
+        includes = matrix.get("include", [])
+        if includes:
+            for item in includes:
+                if isinstance(item, dict):
+                    configs.append(item)
+        
+        # Simple matrix expansion (limited)
+        exclude = matrix.get("exclude", [])
+        
+        # Get all dimension keys
+        dimension_keys = [k for k in matrix.keys() if k not in ["include", "exclude"]]
+        
+        if dimension_keys:
+            # For simple cases, just record the dimensions
+            for key in dimension_keys:
+                values = matrix.get(key, [])
+                if isinstance(values, list):
+                    for val in values:
+                        configs.append({key: val})
+        
+        return configs[:50]  # Limit number of configs
+    
     def _extract_action(self, action_dir: Path) -> Optional[ActionData]:
-        """Extract raw action data."""
+        """Extract detailed action data."""
         action_file = action_dir / "action.yml"
         if not action_file.exists():
             action_file = action_dir / "action.yaml"
@@ -287,37 +384,57 @@ class CIDataExtractor:
             with open(action_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             
+            # Extract inputs with details
+            inputs = {}
+            for name, inp in (data.get("inputs", {}) or {}).items():
+                if isinstance(inp, dict):
+                    inputs[name] = {
+                        "description": inp.get("description", ""),
+                        "required": inp.get("required", False),
+                        "default": inp.get("default", "")
+                    }
+            
+            # Extract outputs
+            outputs = {}
+            for name, out in (data.get("outputs", {}) or {}).items():
+                if isinstance(out, dict):
+                    outputs[name] = {
+                        "description": out.get("description", ""),
+                        "value": out.get("value", "")
+                    }
+            
             # Extract steps
             runs = data.get("runs", {})
-            steps = runs.get("steps", []) if isinstance(runs, dict) else []
-            
-            # Extract called actions
+            steps = []
             called_actions = []
-            for step in steps:
-                if isinstance(step, dict):
-                    step_uses = step.get("uses", "")
-                    if step_uses:
-                        called_actions.append(step_uses)
+            
+            if isinstance(runs, dict):
+                steps = self._extract_steps(runs.get("steps", []))
+                for step in steps:
+                    if step.uses:
+                        called_actions.append(step.uses)
             
             return ActionData(
                 name=action_dir.name,
                 path=str(action_dir.relative_to(self.repo_path)),
                 description=data.get("description", ""),
-                inputs=list((data.get("inputs", {}) or {}).keys()),
-                outputs=list((data.get("outputs", {}) or {}).keys()),
+                inputs=inputs,
+                outputs=outputs,
                 runs_steps=steps,
+                runs_using=runs.get("using", "") if isinstance(runs, dict) else "",
                 called_actions=called_actions
             )
         except Exception as e:
             print(f"Error parsing action {action_dir}: {e}", file=sys.stderr)
             return None
     
-    def _extract_scripts(self, ci_dirs: Dict[str, Path]) -> List[ScriptData]:
-        """Extract script information."""
+    def _extract_scripts(self, ci_dirs: Dict[str, Path]) -> Tuple[List[ScriptData], Dict[str, List[str]]]:
+        """Extract script information with directory mapping."""
         scripts = []
+        scripts_by_dir = defaultdict(list)
         seen = set()
         
-        for key, path in ci_dirs.items():
+        for dir_key, path in ci_dirs.items():
             if not isinstance(path, Path) or not path.exists():
                 continue
             
@@ -329,30 +446,36 @@ class CIDataExtractor:
                             with open(f, "r", encoding="utf-8", errors="ignore") as fp:
                                 content = fp.read()
                             
-                            # Get preview
-                            lines = content.split("\n")[:50]
-                            preview = "\n".join(lines)
-                            
                             # Extract functions (for Python and Shell)
                             functions = []
+                            imports = []
                             if f.suffix == ".py":
                                 func_pattern = r'^def\s+(\w+)\s*\('
                                 functions = re.findall(func_pattern, content, re.MULTILINE)
+                                import_pattern = r'^(?:import|from)\s+(\S+)'
+                                imports = re.findall(import_pattern, content, re.MULTILINE)
                             elif f.suffix == ".sh":
                                 func_pattern = r'^(?:function\s+)?(\w+)\s*\(\s*\)\s*\{'
                                 functions = re.findall(func_pattern, content, re.MULTILINE)
                             
-                            scripts.append(ScriptData(
+                            script = ScriptData(
                                 name=f.name,
                                 path=str(f.relative_to(self.repo_path)),
                                 type=f.suffix,
-                                content_preview=preview,
-                                functions=functions
-                            ))
+                                content=content[:5000],  # Limit content
+                                functions=functions,
+                                imports=imports
+                            )
+                            scripts.append(script)
+                            
+                            # Map to directory
+                            rel_dir = str(f.parent.relative_to(self.repo_path))
+                            scripts_by_dir[rel_dir].append(f.name)
+                            
                         except Exception as e:
                             pass
         
-        return scripts[:100]  # Limit
+        return scripts[:100], dict(scripts_by_dir)  # Limit
     
     def _build_relationships(self, data: CIData):
         """Build relationship graphs from extracted data."""
@@ -384,6 +507,17 @@ class CIDataExtractor:
                     # Track local action usage
                     if called_action.startswith("local:") and called_action in action_map:
                         action_map[called_action].used_by.append(f"{wf_name}::{job_name}")
+        
+        # Track script usage in workflows
+        script_names = {s.name: s for s in data.scripts}
+        for wf_name, wf in data.workflows.items():
+            for job_name, job in wf.jobs.items():
+                for step in job.steps:
+                    run_script = step.run
+                    if run_script:
+                        for script_name, script in script_names.items():
+                            if script_name in run_script:
+                                script.called_by.append(f"{wf_name}::{job_name}")
 
 
 def extract_to_json(repo_path: str, output_file: str = None) -> str:
@@ -399,6 +533,7 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
         "workflows": {},
         "actions": [],
         "scripts": [],
+        "scripts_by_directory": data.scripts_by_directory,
         "relationships": {
             "workflow_calls": data.workflow_call_graph,
             "job_dependencies": data.job_dependency_graph,
@@ -406,24 +541,46 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
         }
     }
     
-    # Convert workflows
+    # Convert workflows with full details
     for wf_name, wf in data.workflows.items():
         result["workflows"][wf_name] = {
             "name": wf.name,
             "filename": wf.filename,
+            "path": wf.path,
             "triggers": wf.triggers,
+            "trigger_details": wf.trigger_details,
+            "env_vars": wf.env_vars,
+            "concurrency": wf.concurrency,
             "jobs": {
                 job_name: {
+                    "display_name": job.display_name,
                     "runs_on": job.runs_on,
                     "needs": job.needs,
-                    "steps": job.steps,
+                    "uses": job.uses,
+                    "with_params": job.with_params,
+                    "if_condition": job.if_condition,
+                    "matrix": job.matrix,
+                    "matrix_configs": job.matrix_configs,
+                    "env_vars": job.env_vars,
+                    "outputs": job.outputs,
+                    "timeout_minutes": job.timeout_minutes,
+                    "steps": [
+                        {
+                            "name": step.name,
+                            "id": step.id,
+                            "uses": step.uses,
+                            "run": step.run[:500] if step.run else "",  # Limit
+                            "with_params": step.with_params,
+                            "env": step.env,
+                        }
+                        for step in job.steps
+                    ],
                     "calls_workflows": job.calls_workflows,
                     "calls_actions": job.calls_actions,
                 }
                 for job_name, job in wf.jobs.items()
             },
             "callers": wf.callers,
-            "content_summary": wf.raw_content_summary[:2000],  # Limit for JSON
         }
     
     # Convert actions
@@ -434,6 +591,7 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
             "description": action.description,
             "inputs": action.inputs,
             "outputs": action.outputs,
+            "runs_using": action.runs_using,
             "called_actions": action.called_actions,
             "used_by": action.used_by,
         })
@@ -445,7 +603,9 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
             "path": script.path,
             "type": script.type,
             "functions": script.functions,
-            "content_preview": script.content_preview[:1000],  # Limit
+            "imports": script.imports,
+            "content_preview": script.content[:1500],  # Limit
+            "called_by": script.called_by,
         })
     
     # Output JSON
