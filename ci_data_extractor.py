@@ -95,6 +95,31 @@ class ScriptData:
 
 
 @dataclass
+class PreCommitHookData:
+    """Pre-commit hook configuration."""
+    id: str = ""
+    repo: str = ""
+    rev: str = ""
+    additional_dependencies: List[str] = field(default_factory=list)
+    args: List[str] = field(default_factory=list)
+    files: str = ""
+    exclude: str = ""
+    language: str = ""
+    description: str = ""
+
+
+@dataclass
+class PreCommitConfigData:
+    """Complete pre-commit configuration."""
+    path: str = ""
+    default_stages: List[str] = field(default_factory=list)
+    default_language_version: Dict[str, str] = field(default_factory=dict)
+    ci: Dict[str, Any] = field(default_factory=dict)  # CI-specific settings like autofix_prs
+    repos: List[PreCommitHookData] = field(default_factory=list)
+    local_hooks: List[PreCommitHookData] = field(default_factory=list)  # Local repo hooks
+
+
+@dataclass
 class CIData:
     """Complete CI/CD raw data for LLM analysis."""
     repo_name: str
@@ -102,6 +127,7 @@ class CIData:
     workflows: Dict[str, WorkflowData] = field(default_factory=dict)
     actions: List[ActionData] = field(default_factory=list)
     scripts: List[ScriptData] = field(default_factory=list)
+    pre_commit_configs: List[PreCommitConfigData] = field(default_factory=list)  # pre-commit configs
     # Raw relationship data
     workflow_call_graph: Dict[str, List[str]] = field(default_factory=dict)
     job_dependency_graph: Dict[str, List[str]] = field(default_factory=dict)
@@ -153,6 +179,9 @@ class CIDataExtractor:
         
         # Extract scripts with directory mapping
         data.scripts, data.scripts_by_directory = self._extract_scripts(ci_dirs)
+        
+        # Extract pre-commit configurations
+        data.pre_commit_configs = self._extract_pre_commit_configs()
         
         # Build relationship graphs
         self._build_relationships(data)
@@ -477,6 +506,77 @@ class CIDataExtractor:
         
         return scripts[:100], dict(scripts_by_dir)  # Limit
     
+    def _extract_pre_commit_configs(self) -> List[PreCommitConfigData]:
+        """Extract pre-commit configuration from .pre-commit-config.yaml files."""
+        configs = []
+        
+        # Common pre-commit config file locations
+        config_paths = [
+            self.repo_path / ".pre-commit-config.yaml",
+            self.repo_path / ".pre-commit-config.yml",
+            self.repo_path / ".pre-commit-config" / "config.yaml",
+        ]
+        
+        for config_path in config_paths:
+            if not config_path.exists():
+                continue
+            
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                
+                config = PreCommitConfigData(
+                    path=str(config_path.relative_to(self.repo_path))
+                )
+                
+                # Extract default stages
+                config.default_stages = data.get("default_stages", [])
+                
+                # Extract default language version
+                config.default_language_version = data.get("default_language_version", {})
+                
+                # Extract CI settings
+                config.ci = data.get("ci", {})
+                
+                # Extract repos and hooks
+                repos = data.get("repos", [])
+                for repo_data in repos:
+                    if not isinstance(repo_data, dict):
+                        continue
+                    
+                    repo_url = repo_data.get("repo", "")
+                    rev = repo_data.get("rev", "")
+                    hooks = repo_data.get("hooks", [])
+                    
+                    for hook in hooks:
+                        if not isinstance(hook, dict):
+                            continue
+                        
+                        hook_data = PreCommitHookData(
+                            id=hook.get("id", ""),
+                            repo=repo_url,
+                            rev=rev,
+                            additional_dependencies=hook.get("additional_dependencies", []),
+                            args=hook.get("args", []),
+                            files=hook.get("files", ""),
+                            exclude=hook.get("exclude", ""),
+                            language=hook.get("language", ""),
+                            description=hook.get("description", "")
+                        )
+                        
+                        # Check if it's a local hook (repo == "local")
+                        if repo_url == "local":
+                            config.local_hooks.append(hook_data)
+                        else:
+                            config.repos.append(hook_data)
+                
+                configs.append(config)
+                
+            except Exception as e:
+                print(f"Error parsing pre-commit config {config_path}: {e}", file=sys.stderr)
+        
+        return configs
+    
     def _build_relationships(self, data: CIData):
         """Build relationship graphs from extracted data."""
         # Workflow call graph
@@ -607,6 +707,46 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
             "content_preview": script.content[:1500],  # Limit
             "called_by": script.called_by,
         })
+    
+    # Convert pre-commit configs
+    result["pre_commit_configs"] = []
+    for pc_config in data.pre_commit_configs:
+        config_dict = {
+            "path": pc_config.path,
+            "default_stages": pc_config.default_stages,
+            "default_language_version": pc_config.default_language_version,
+            "ci": pc_config.ci,
+            "repos": [],
+            "local_hooks": [],
+        }
+        
+        # External repo hooks
+        for hook in pc_config.repos:
+            config_dict["repos"].append({
+                "id": hook.id,
+                "repo": hook.repo,
+                "rev": hook.rev,
+                "additional_dependencies": hook.additional_dependencies,
+                "args": hook.args,
+                "files": hook.files,
+                "exclude": hook.exclude,
+                "language": hook.language,
+                "description": hook.description,
+            })
+        
+        # Local hooks
+        for hook in pc_config.local_hooks:
+            config_dict["local_hooks"].append({
+                "id": hook.id,
+                "additional_dependencies": hook.additional_dependencies,
+                "args": hook.args,
+                "files": hook.files,
+                "exclude": hook.exclude,
+                "language": hook.language,
+                "description": hook.description,
+            })
+        
+        result["pre_commit_configs"].append(config_dict)
     
     # Output JSON
     json_str = json.dumps(result, indent=2, ensure_ascii=False)

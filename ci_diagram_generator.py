@@ -22,7 +22,9 @@ def generate_llm_prompt(raw_data: Dict) -> str:
     - Creating readable architecture documentation
     """
     
-    prompt = """# CI/CD Architecture Analysis Request
+    prompt = """# CI/CD 架构分析请求
+
+**重要：本文档必须使用中文输出！所有内容、标题、描述、分析都必须使用中文！**
 
 你是一位资深DevOps工程师，请深入分析项目的CI/CD架构，并生成一份结构清晰的架构文档。
 
@@ -61,6 +63,14 @@ def generate_llm_prompt(raw_data: Dict) -> str:
 - 关键配置参数
 - Matrix配置内容
 - 输入输出参数
+
+### 5. 【必须】完整列出所有Job
+
+**严格要求**：必须完整列出每个工作流中的所有Job，不能省略任何Job！
+- 必须包含所有Job的名称
+- 必须描述每个Job的目的
+- 不能使用"..."或其他省略符号
+- 即使Job数量很多，也必须全部列出
 
 ---
 
@@ -264,11 +274,71 @@ def generate_llm_prompt(raw_data: Dict) -> str:
             if called_by:
                 prompt += f"**被调用**: {len(called_by)} 次\n\n"
     
+    # Add pre-commit configurations
+    pre_commit_configs = raw_data.get("pre_commit_configs", [])
+    if pre_commit_configs:
+        prompt += "### Pre-commit 配置\n\n"
+        prompt += "**说明**: Pre-commit 是一个本地代码质量检查框架，在git commit前自动运行检查。虽然不通过GitHub Actions触发，但属于CI/CD整体能力的一部分。\n\n"
+        
+        for config in pre_commit_configs:
+            prompt += f"#### 配置文件: `{config.get('path')}`\n\n"
+            
+            # CI settings
+            ci_settings = config.get("ci", {})
+            if ci_settings:
+                prompt += f"**CI设置**:\n```\n"
+                for k, v in ci_settings.items():
+                    prompt += f"  {k}: {v}\n"
+                prompt += "```\n\n"
+            
+            # Default stages
+            default_stages = config.get("default_stages", [])
+            if default_stages:
+                prompt += f"**默认阶段**: {', '.join(default_stages)}\n\n"
+            
+            # External repo hooks
+            repos = config.get("repos", [])
+            if repos:
+                prompt += f"**外部Hook** ({len(repos)}个):\n```\n"
+                # Group by repo for better readability
+                repos_by_source = {}
+                for hook in repos:
+                    repo = hook.get("repo", "unknown")
+                    if repo not in repos_by_source:
+                        repos_by_source[repo] = []
+                    repos_by_source[repo].append(hook)
+                
+                for repo_url, hooks in repos_by_source.items():
+                    prompt += f"\n# 来源: {repo_url}\n"
+                    for hook in hooks:
+                        hook_id = hook.get("id", "")
+                        desc = hook.get("description", "")[:50] if hook.get("description") else ""
+                        prompt += f"  - {hook_id}"
+                        if desc:
+                            prompt += f": {desc}"
+                        prompt += "\n"
+                prompt += "```\n\n"
+            
+            # Local hooks
+            local_hooks = config.get("local_hooks", [])
+            if local_hooks:
+                prompt += f"**本地Hook** ({len(local_hooks)}个):\n```\n"
+                for hook in local_hooks:
+                    hook_id = hook.get("id", "")
+                    desc = hook.get("description", "")[:50] if hook.get("description") else ""
+                    prompt += f"  - {hook_id}"
+                    if desc:
+                        prompt += f": {desc}"
+                    prompt += "\n"
+                prompt += "```\n\n"
+    
     # Expected output format
     prompt += """
 ---
 
 ## 输出格式要求
+
+**语言要求：本文档必须使用中文输出！所有标题、描述、分析内容都必须是中文！**
 
 请输出一个完整的Markdown格式文档，按照你分析出的逻辑顺序组织内容。
 
@@ -281,7 +351,7 @@ def generate_llm_prompt(raw_data: Dict) -> str:
 3. **按阶段组织的内容** - 每个阶段包含：
    - 阶段说明（这个阶段做什么）
    - 相关工作流列表
-   - 工作流详情（触发条件、Job列表、关键配置）
+   - 工作流详情（触发条件、**完整Job列表**、关键配置）
    - 调用的脚本和Action
    - 与其他阶段的关系
 
@@ -289,40 +359,58 @@ def generate_llm_prompt(raw_data: Dict) -> str:
 
 5. **关键发现和建议**
 
+### Job列表要求
+
+**必须完整列出所有Job！** 对于每个工作流：
+- 列出所有Job的名称（不能省略任何一个）
+- 每个Job都要有简要描述
+- 标注Job之间的依赖关系（needs）
+- 如果有Matrix配置，说明有多少个变体
+
 ### 格式示例
 
 ```markdown
 # [项目名] CI/CD架构分析
 
 ## 项目概述
-[项目类型和CI/CD整体描述]
+[项目类型和CI/CD整体描述，使用中文]
 
 ## CI/CD流程概览
-[流程图或执行顺序]
+[流程图或执行顺序，使用中文]
 
 ## 阶段一：触发与入口
+
 ### 触发条件
-- push事件触发：...
-- PR事件触发：...
-- 定时触发：...
+- push事件触发：xxx工作流
+- PR事件触发：xxx工作流
+- 定时触发：xxx工作流
 
 ### 入口工作流
+
 #### pull.yml
 - **目的**: PR验证入口
 - **触发**: pull_request
-- **执行Job**:
+- **包含的Job**（共X个）:
   1. get-label-type: 确定运行器类型
   2. target-determination: 确定测试目标
   3. linux-build: 构建Linux版本
   4. linux-test: 运行测试
-- **依赖关系**: pull.yml -> target-determination -> linux-build -> linux-test
+  5. [必须列出所有Job，不能省略]
+- **依赖关系**: get-label-type -> target-determination -> linux-build -> linux-test
 - **关键配置**: [列出重要的with_params]
 
 #### trunk.yml
-[类似结构]
+- **目的**: 主分支构建
+- **触发**: push到main分支
+- **包含的Job**（共X个）:
+  1. job1: 描述
+  2. job2: 描述
+  3. [完整列出]
+- **依赖关系**: ...
+- **关键配置**: ...
 
 ## 阶段二：构建
-[类似结构]
+[类似结构，完整列出所有工作流的所有Job]
 
 ...
 
@@ -330,26 +418,27 @@ def generate_llm_prompt(raw_data: Dict) -> str:
 ### .github/scripts/
 - build.sh: 构建脚本
 - test.sh: 测试脚本
-[...]
+[完整列出所有脚本]
 
 ## 复合Action目录
 ### .github/actions/setup-linux/
 - 用途: Linux环境设置
 - 输入: [参数列表]
 - 使用于: [工作流列表]
-[...]
+[完整列出所有Action]
 
 ## 发现和建议
-1. [发现或建议]
+1. [发现或建议，使用中文]
 2. [...]
 ```
 
-**重要**:
-1. 不要硬编码分类，根据实际内容分析
-2. 展示调用关系和依赖关系
-3. 提供足够的细节但不冗余
-4. 使用清晰的层级结构
-5. 包含关键的配置参数值
+**重要提醒**:
+1. **必须使用中文输出所有内容**
+2. **必须完整列出每个工作流的所有Job，不能省略**
+3. 不要硬编码分类，根据实际内容分析
+4. 展示调用关系和依赖关系
+5. 提供足够的细节但不冗余
+6. 使用清晰的层级结构
 """
 
     return prompt

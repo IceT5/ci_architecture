@@ -81,6 +81,7 @@ python ci_data_extractor.py /path/to/repo ci_data.json
 - CI脚本及其函数列表
 - 工作流调用关系图
 - Action使用统计
+- **Pre-commit配置**（.pre-commit-config.yaml）及其Hook列表
 
 ### 第二步：生成Prompt
 
@@ -158,7 +159,13 @@ LLM生成的架构文档包含：
 - 用途说明
 - 被哪些工作流调用
 
-### 6. 关键发现和建议
+### 6. Pre-commit配置（如存在）
+- 外部Hook列表（来自各仓库）
+- 本地Hook列表
+- 默认阶段配置
+- CI相关设置
+
+### 7. 关键发现和建议
 
 ## LLM分析原则
 
