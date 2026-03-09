@@ -190,8 +190,8 @@ def generate_llm_prompt(raw_data: Dict) -> str:
                         prompt += f"**条件**: `{if_condition[:100]}`\n\n"
                     
                     # Matrix
-                    matrix = job.get("matrix", {})
-                    if matrix:
+                    matrix = job.get("matrix")
+                    if matrix and isinstance(matrix, dict):
                         include = matrix.get("include", [])
                         if include:
                             prompt += f"**Matrix配置** ({len(include)}个变体):\n```\n"
@@ -202,6 +202,9 @@ def generate_llm_prompt(raw_data: Dict) -> str:
                             if len(include) > 5:
                                 prompt += f"  ... (+{len(include)-5} more)\n"
                             prompt += "```\n\n"
+                    elif matrix:
+                        # Matrix is a string or other non-dict type (e.g., expression)
+                        prompt += f"**Matrix配置**: `{str(matrix)[:200]}`\n\n"
                     
                     # Steps
                     steps = job.get("steps", [])
