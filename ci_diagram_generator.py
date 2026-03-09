@@ -514,7 +514,16 @@ if __name__ == "__main__":
             raw_data = json.load(f)
         
         prompt = generate_llm_prompt(raw_data)
-        print(prompt)
+        
+        # Check if output file is specified
+        if len(sys.argv) > 3:
+            output_file = sys.argv[3]
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(prompt)
+            print(f"Prompt saved to: {output_file}")
+        else:
+            # Print to console with UTF-8 encoding
+            sys.stdout.buffer.write(prompt.encode("utf-8"))
     
     elif command == "diagram":
         # Generate diagram from raw data + LLM response

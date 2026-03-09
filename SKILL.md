@@ -66,9 +66,11 @@ description: |
 
 ## 使用方法
 
-**重要：每次执行此skill后，必须生成最终结果文件 `CI_ARCHITECTURE.md`！**
+**重要：此skill必须严格按照以下步骤执行，每个步骤都必须实际运行Python脚本！**
 
-### 第一步：提取数据
+**禁止跳过步骤！禁止直接基于提取数据创建文档！必须通过LLM分析生成！**
+
+### 第一步：提取数据（必须执行）
 
 ```bash
 python ci_data_extractor.py /path/to/repo ci_data.json
@@ -83,11 +85,17 @@ python ci_data_extractor.py /path/to/repo ci_data.json
 - Action使用统计
 - **Pre-commit配置**（.pre-commit-config.yaml）及其Hook列表
 
-### 第二步：生成Prompt
+### 第二步：生成Prompt（必须执行）
 
 ```bash
+# 方法一：直接输出到文件（推荐，避免编码问题）
+python ci_diagram_generator.py prompt ci_data.json prompt.txt
+
+# 方法二：重定向输出
 python ci_diagram_generator.py prompt ci_data.json > prompt.txt
 ```
+
+**注意**：推荐使用方法一（直接指定输出文件），可以避免Windows控制台的编码问题。
 
 这会生成一个详细的中文Prompt，包含：
 - 项目基本信息
@@ -98,9 +106,14 @@ python ci_diagram_generator.py prompt ci_data.json > prompt.txt
 - CI脚本信息
 - 输出格式指导
 
-### 第三步：发送给LLM
+### 第三步：发送给LLM（必须执行）
 
-将 `prompt.txt` 的内容发送给LLM（Claude、GPT等），让LLM分析并生成架构文档。
+**这一步是核心！必须将prompt发送给LLM进行分析，不能跳过！**
+
+1. 读取 `prompt.txt` 的完整内容
+2. 将内容发送给LLM（Claude、GPT等）
+3. 等待LLM分析并生成架构文档
+4. **保存LLM的完整响应为 `llm_response.md`**
 
 LLM会：
 1. 分析CI/CD流程阶段（根据实际内容，不使用预设分类）
@@ -108,7 +121,7 @@ LLM会：
 3. 展示完整的调用链和依赖关系
 4. 生成清晰的Markdown文档
 
-保存LLM的响应为 `llm_response.md`
+**警告：不要自己生成架构文档！必须由LLM生成！**
 
 ### 第四步：生成最终文档（必须执行！）
 
@@ -117,6 +130,31 @@ python ci_diagram_generator.py diagram ci_data.json llm_response.md CI_ARCHITECT
 ```
 
 **此步骤必须执行，确保最终结果文件 `CI_ARCHITECTURE.md` 被创建。**
+
+### 执行流程图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  第一步：python ci_data_extractor.py /repo ci_data.json        │
+│  输出：ci_data.json                                              │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第二步：python ci_diagram_generator.py prompt ci_data.json prompt.txt │
+│  输出：prompt.txt                                                │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第三步：发送prompt.txt给LLM → 保存响应为llm_response.md        │
+│  ⚠️ 必须由LLM生成文档，不能自己生成！                            │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第四步：python ci_diagram_generator.py diagram ci_data.json    │
+│          llm_response.md CI_ARCHITECTURE.md                     │
+│  输出：CI_ARCHITECTURE.md                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## 执行检查清单
 
