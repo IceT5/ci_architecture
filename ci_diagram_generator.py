@@ -349,7 +349,28 @@ def generate_llm_prompt(raw_data: Dict) -> str:
 
 1. **项目概述** - 简要描述项目类型和CI/CD整体架构
 
-2. **CI/CD流程图** - 用文本或ASCII图形展示整体流程
+2. **CI/CD整体架构图** - **必须**在文档开头部分使用ASCII diagram形式展示整体架构：
+   - 展示完整的CI/CD流程阶段
+   - 使用框线(┌─┐│└┘)和箭头(→▶▼▲)表示流程方向
+   - 标注每个阶段的关键操作
+   - 清晰展示阶段之间的依赖关系
+   
+   示例格式：
+   ```
+   ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+   │  触发入口  │────▶│  代码检查  │────▶│   构建    │────▶│   测试    │
+   │ • push   │     │ • lint   │     │ • compile│     │ • unit   │
+   │ • PR     │     │ • format │     │ • package│     │ • e2e    │
+   └──────────┘     └──────────┘     └──────────┘     └──────────┘
+         │                                   │
+         └───────────────────────────────────┘
+                          ↓
+                   ┌──────────┐     ┌──────────┐
+                   │   部署    │────▶│  通知    │
+                   │ • staging│     │ • slack  │
+                   │ • prod   │     │ • email  │
+                   └──────────┘     └──────────┘
+   ```
 
 3. **按阶段组织的内容** - 每个阶段包含：
    - 阶段说明（这个阶段做什么）
@@ -491,42 +512,365 @@ def generate_architecture_diagram(
     return content
 
 
+def generate_split_prompts(raw_data: Dict, output_dir: str, max_workflows_per_batch: int = 10) -> List[str]:
+    """Generate multiple prompt files for large projects.
+    
+    Args:
+        raw_data: Extracted CI/CD data
+        output_dir: Directory to save prompt files
+        max_workflows_per_batch: Maximum workflows per batch
+    
+    Returns:
+        List of generated prompt file paths
+    """
+    import os
+    
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    workflows = raw_data.get("workflows", {})
+    workflow_names = list(workflows.keys())
+    
+    # Generate global context (included in all batches)
+    global_context = _generate_global_context(raw_data)
+    
+    # Split workflows into batches
+    batches = []
+    for i in range(0, len(workflow_names), max_workflows_per_batch):
+        batch_names = workflow_names[i:i + max_workflows_per_batch]
+        batches.append(batch_names)
+    
+    generated_files = []
+    
+    # Generate main prompt (overview)
+    main_prompt = _generate_main_prompt(raw_data, global_context)
+    main_file = os.path.join(output_dir, "prompt_main.txt")
+    with open(main_file, "w", encoding="utf-8") as f:
+        f.write(main_prompt)
+    generated_files.append(main_file)
+    print(f"Generated: {main_file}")
+    
+    # Generate batch prompts
+    for batch_idx, batch_names in enumerate(batches, 1):
+        batch_prompt = _generate_batch_prompt(raw_data, global_context, batch_names, batch_idx, len(batches))
+        batch_file = os.path.join(output_dir, f"prompt_{batch_idx}.txt")
+        with open(batch_file, "w", encoding="utf-8") as f:
+            f.write(batch_prompt)
+        generated_files.append(batch_file)
+        print(f"Generated: {batch_file}")
+    
+    # Generate merge instructions
+    merge_file = os.path.join(output_dir, "README.txt")
+    
+    if len(batches) == 0:
+        batch_info = "无详细批次（项目无工作流）"
+    elif len(batches) == 1:
+        batch_info = "prompt_1.txt - 详细文档"
+    else:
+        batch_info = f"prompt_1.txt ~ prompt_{len(batches)}.txt - 详细文档批次"
+    
+    merge_content = f"""# Prompt文件说明
+
+此项目CI/CD较大，已自动分割为多个prompt文件：
+
+1. prompt_main.txt - 概览文档，包含：
+   - 项目基本信息
+   - 完整调用关系图
+   - 所有工作流简要列表
+
+2. {batch_info}：
+   - 每个包含完整调用关系图
+   - 当前批次的详细工作流信息
+   - 其他批次的简要信息
+
+## 使用方式
+
+### 方式一：并行处理（推荐）
+使用多个subagent并行处理各批次：
+- Subagent 1: 处理 prompt_main.txt → 生成概览文档
+- Subagent 2: 处理 prompt_1.txt → 生成第1批详细分析
+- Subagent 3: 处理 prompt_2.txt → 生成第2批详细分析
+- ...
+最后合并所有结果。
+
+### 方式二：顺序处理
+依次处理每个prompt文件，最后合并结果。
+
+## 合并结果
+
+所有subagent完成后，将响应合并为一个文件后执行：
+python ci_diagram_generator.py diagram ci_data.json merged_response.md CI_ARCHITECTURE.md
+"""
+    with open(merge_file, "w", encoding="utf-8") as f:
+        f.write(merge_content)
+    generated_files.append(merge_file)
+    print(f"Generated: {merge_file}")
+    
+    return generated_files
+
+
+def _generate_global_context(raw_data: Dict) -> str:
+    """Generate global context (included in all batches)."""
+    context = "## 全局信息\n\n"
+    
+    # Repository info
+    context += f"### 仓库名称\n{raw_data.get('repo_name', 'Unknown')}\n\n"
+    
+    # CI directories
+    ci_dirs = raw_data.get("ci_directories", [])
+    if ci_dirs:
+        context += f"### CI相关目录\n{', '.join(ci_dirs)}\n\n"
+    
+    # Workflow relationships (complete)
+    relationships = raw_data.get("relationships", {})
+    workflow_calls = relationships.get("workflow_calls", {})
+    if workflow_calls:
+        context += "### 完整调用关系图\n```\n"
+        context += "# 格式: 被调用工作流 <- 调用者\n"
+        for callee, callers in workflow_calls.items():
+            context += f"{callee}\n  <- {', '.join(callers[:5])}"
+            if len(callers) > 5:
+                context += f" (+{len(callers)-5})"
+            context += "\n"
+        context += "```\n\n"
+    
+    # Action usage summary
+    action_usages = relationships.get("action_usages", {})
+    if action_usages:
+        context += "### Action使用统计\n"
+        for action, users in list(action_usages.items())[:10]:
+            context += f"- {action}: {len(users)}处使用\n"
+        if len(action_usages) > 10:
+            context += f"- ... 共{len(action_usages)}个Action\n"
+        context += "\n"
+    
+    # All workflows summary
+    workflows = raw_data.get("workflows", {})
+    if workflows:
+        context += "### 工作流列表\n"
+        for wf_name, wf in workflows.items():
+            triggers = wf.get("triggers", [])
+            jobs = wf.get("jobs", {})
+            context += f"- {wf_name}: {len(jobs)}个Jobs, 触发: {', '.join(triggers[:3])}\n"
+        context += "\n"
+    
+    return context
+
+
+def _generate_main_prompt(raw_data: Dict, global_context: str) -> str:
+    """Generate main overview prompt."""
+    prompt = """# CI/CD 架构分析 - 概览文档
+
+**重要：本文档必须使用中文输出！**
+
+你正在分析一个大型项目的CI/CD架构。请生成概览文档。
+
+## 输出要求
+
+1. 项目概述
+2. **CI/CD整体架构图** - **必须**使用ASCII diagram形式展示：
+   - 展示完整的CI/CD流程阶段
+   - 使用框线(┌─┐│└┘)和箭头(→▶▼▲)表示流程方向
+   - 标注每个阶段的关键操作
+   
+   示例：
+   ```
+   ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+   │  触发入口  │────▶│  代码检查  │────▶│   构建    │────▶│   测试    │
+   │ • push   │     │ • lint   │     │ • compile│     │ • unit   │
+   └──────────┘     └──────────┘     └──────────┘     └──────────┘
+                          ↓
+                   ┌──────────┐     ┌──────────┐
+                   │   部署    │────▶│  通知    │
+                   └──────────┘     └──────────┘
+   ```
+3. 工作流分类（按阶段/功能）
+4. 附录：完整工作流调用关系树
+
+"""
+    
+    prompt += global_context
+    
+    prompt += """
+## 输出格式
+
+请生成概览文档，包含：
+1. 项目CI/CD整体描述
+2. **ASCII架构图（必须）**
+3. 主要阶段划分
+4. 工作流分类列表
+5. 调用关系树状图
+
+**必须使用中文输出！必须包含ASCII架构图！**
+"""
+    
+    return prompt
+
+
+def _generate_batch_prompt(raw_data: Dict, global_context: str, batch_names: List[str], batch_idx: int, total_batches: int) -> str:
+    """Generate batch prompt with full context."""
+    prompt = f"""# CI/CD 架构分析 - 详细文档（批次 {batch_idx}/{total_batches}）
+
+**重要：本文档必须使用中文输出！完整列出所有Job！**
+
+你正在分析一个大型项目的CI/CD架构。这是第{batch_idx}批次详细分析。
+
+"""
+    
+    # Add global context
+    prompt += global_context
+    
+    # Add current batch workflows
+    prompt += "## 本批次工作流详情\n\n"
+    
+    workflows = raw_data.get("workflows", {})
+    for wf_name in batch_names:
+        if wf_name in workflows:
+            wf = workflows[wf_name]
+            prompt += _format_workflow_detail(wf_name, wf)
+    
+    # Add other batches summary
+    prompt += "\n## 其他批次工作流（简要）\n\n"
+    other_workflows = [wf for wf in workflows.keys() if wf not in batch_names]
+    for wf_name in other_workflows[:20]:  # Limit to 20
+        wf = workflows[wf_name]
+        triggers = wf.get("triggers", [])
+        jobs = wf.get("jobs", {})
+        prompt += f"- {wf_name}: {len(jobs)}个Jobs, 触发: {', '.join(triggers[:3])}\n"
+    if len(other_workflows) > 20:
+        prompt += f"- ... 共{len(other_workflows)}个工作流\n"
+    
+    prompt += """
+## 输出格式要求
+
+1. 每个工作流必须完整列出所有Job
+2. 标注Job之间的依赖关系
+3. 说明触发条件和调用关系
+4. 提供关键配置信息
+
+**必须使用中文输出！不能省略任何Job！**
+"""
+    
+    return prompt
+
+
+def _format_workflow_detail(wf_name: str, wf: Dict) -> str:
+    """Format a single workflow for prompt."""
+    result = f"### {wf_name}\n\n"
+    
+    # Basic info
+    result += f"**名称**: {wf.get('name', 'N/A')}\n\n"
+    result += f"**路径**: `{wf.get('path', 'N/A')}`\n\n"
+    
+    # Triggers
+    triggers = wf.get("triggers", [])
+    result += f"**触发条件**: {', '.join(triggers)}\n\n"
+    
+    # Jobs
+    jobs = wf.get("jobs", {})
+    result += f"**Jobs** ({len(jobs)}个):\n\n"
+    
+    for job_name, job in jobs.items():
+        result += f"#### `{job_name}`\n\n"
+        
+        needs = job.get("needs", [])
+        if needs:
+            result += f"**依赖**: {', '.join(needs)}\n\n"
+        
+        runs_on = job.get("runs_on", "")
+        if runs_on:
+            result += f"**运行环境**: `{runs_on}`\n\n"
+        
+        uses = job.get("uses", "")
+        if uses:
+            result += f"**调用工作流**: `{uses}`\n\n"
+        
+        # Steps summary
+        steps = job.get("steps", [])
+        if steps:
+            result += f"**步骤** ({len(steps)}步):\n"
+            for i, step in enumerate(steps[:10], 1):
+                step_name = step.get("name", "") or step.get("uses", "") or f"step-{i}"
+                if step.get("uses"):
+                    result += f"  {i}. {step_name} → {step.get('uses', '')}\n"
+                elif step.get("run"):
+                    run_preview = step.get("run", "")[:50].replace("\n", " ")
+                    result += f"  {i}. {step_name} → run: {run_preview}...\n"
+                else:
+                    result += f"  {i}. {step_name}\n"
+            if len(steps) > 10:
+                result += f"  ... 共{len(steps)}步\n"
+            result += "\n"
+        
+        # Calls
+        calls_workflows = job.get("calls_workflows", [])
+        calls_actions = job.get("calls_actions", [])
+        if calls_workflows:
+            result += f"**调用工作流**: {', '.join(calls_workflows)}\n\n"
+        if calls_actions:
+            result += f"**使用Action**: {', '.join(calls_actions[:5])}\n\n"
+    
+    result += "---\n\n"
+    return result
+
+
 if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 3:
         print("Usage:")
-        print("  python ci_diagram_generator.py prompt <raw_data.json> - Generate LLM prompt")
-        print("  python ci_diagram_generator.py diagram <raw_data.json> <llm_response.md> [output_file] - Generate diagram")
+        print("  python ci_diagram_generator.py prompt <raw_data.json> [output_file]")
+        print("  python ci_diagram_generator.py split <raw_data.json> <output_dir> [max_workflows_per_batch]")
+        print("  python ci_diagram_generator.py diagram <raw_data.json> <llm_response.md> [output_file]")
+        print()
+        print("Commands:")
+        print("  prompt  - Generate single prompt file")
+        print("  split   - Split large project into multiple prompt files")
+        print("  diagram - Generate final document from LLM response")
         print()
         print("Workflow:")
-        print("  1. Extract data: python ci_data_extractor.py /path/to/repo ci_data.json")
-        print("  2. Generate prompt: python ci_diagram_generator.py prompt ci_data.json > prompt.txt")
-        print("  3. Send prompt to LLM and save response as llm_response.md")
-        print("  4. Generate diagram: python ci_diagram_generator.py diagram ci_data.json llm_response.md CI_ARCHITECTURE.md")
+        print("  Small projects:")
+        print("    1. python ci_diagram_generator.py prompt ci_data.json prompt.txt")
+        print("    2. Send prompt to LLM, save as response.md")
+        print("    3. python ci_diagram_generator.py diagram ci_data.json response.md output.md")
+        print()
+        print("  Large projects (>20 workflows):")
+        print("    1. python ci_diagram_generator.py split ci_data.json ./prompts/")
+        print("    2. Process each prompt file with subagents")
+        print("    3. Merge responses and run diagram command")
         sys.exit(1)
     
     command = sys.argv[1]
     
     if command == "prompt":
-        # Generate LLM prompt from raw data
+        # Generate single LLM prompt
         with open(sys.argv[2], "r", encoding="utf-8") as f:
             raw_data = json.load(f)
         
         prompt = generate_llm_prompt(raw_data)
         
-        # Check if output file is specified
         if len(sys.argv) > 3:
             output_file = sys.argv[3]
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(prompt)
             print(f"Prompt saved to: {output_file}")
         else:
-            # Print to console with UTF-8 encoding
             sys.stdout.buffer.write(prompt.encode("utf-8"))
     
+    elif command == "split":
+        # Generate split prompts for large projects
+        with open(sys.argv[2], "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        
+        output_dir = sys.argv[3] if len(sys.argv) > 3 else "./prompts"
+        max_per_batch = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+        
+        files = generate_split_prompts(raw_data, output_dir, max_per_batch)
+        print(f"\nGenerated {len(files)} files in {output_dir}")
+        print("Check README.txt for usage instructions")
+    
     elif command == "diagram":
-        # Generate diagram from raw data + LLM response
+        # Generate diagram from LLM response
         with open(sys.argv[2], "r", encoding="utf-8") as f:
             raw_data = json.load(f)
         
