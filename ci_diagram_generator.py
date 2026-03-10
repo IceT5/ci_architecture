@@ -189,22 +189,40 @@ def generate_llm_prompt(raw_data: Dict) -> str:
                     if if_condition:
                         prompt += f"**条件**: `{if_condition[:100]}`\n\n"
                     
-                    # Matrix
+                    # Matrix - 完整展示所有展开的配置
                     matrix = job.get("matrix")
-                    if matrix and isinstance(matrix, dict):
-                        include = matrix.get("include", [])
-                        if include:
-                            prompt += f"**Matrix配置** ({len(include)}个变体):\n```\n"
-                            for cfg in include[:5]:
-                                if isinstance(cfg, dict):
-                                    items = list(cfg.items())[:4]
-                                    prompt += "  " + ", ".join(f"{k}={v}" for k, v in items) + "\n"
-                            if len(include) > 5:
-                                prompt += f"  ... (+{len(include)-5} more)\n"
+                    matrix_configs = job.get("matrix_configs", [])
+                    
+                    if matrix:
+                        prompt += f"**Matrix配置**:\n"
+                        
+                        # 显示原始matrix定义
+                        if isinstance(matrix, dict):
+                            prompt += "```\n原始定义:\n"
+                            for k, v in matrix.items():
+                                if k not in ["include", "exclude"]:
+                                    if isinstance(v, list):
+                                        prompt += f"  {k}: {v}\n"
+                                    else:
+                                        prompt += f"  {k}: {str(v)[:100]}\n"
+                            if matrix.get("include"):
+                                prompt += f"  include: {len(matrix['include'])}个配置\n"
+                            if matrix.get("exclude"):
+                                prompt += f"  exclude: {len(matrix['exclude'])}个排除项\n"
                             prompt += "```\n\n"
-                    elif matrix:
-                        # Matrix is a string or other non-dict type (e.g., expression)
-                        prompt += f"**Matrix配置**: `{str(matrix)[:200]}`\n\n"
+                        
+                        # 完整展示所有展开后的配置（不限制数量）
+                        if matrix_configs:
+                            prompt += f"**展开后的Job变体** ({len(matrix_configs)}个，必须全部列出):\n```\n"
+                            for idx, cfg in enumerate(matrix_configs, 1):
+                                if isinstance(cfg, dict):
+                                    items = list(cfg.items())
+                                    cfg_str = ", ".join(f"{k}={v}" for k, v in items)
+                                    prompt += f"  {idx}. {cfg_str}\n"
+                            prompt += "```\n\n"
+                        else:
+                            # 如果没有展开的配置，说明可能是表达式
+                            prompt += f"**注意**: Matrix可能使用表达式动态生成，无法静态展开\n\n"
                     
                     # Steps
                     steps = job.get("steps", [])

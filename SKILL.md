@@ -364,6 +364,28 @@ ASCII架构图要求：
 - 关键配置参数
 - 执行步骤概览
 
+**⚠️ Matrix Job完整展示要求：**
+
+对于使用Matrix策略的Job，**必须完整展开并列出所有Matrix变体**：
+
+- 不能只说"有N个变体"或使用省略号
+- 必须逐个列出每个Matrix组合生成的Job实例
+- 即使有几十个甚至上百个变体，也必须全部列出
+- 每个变体需要说明其具体配置参数
+
+**示例输出格式：**
+```
+#### build (Matrix Job)
+Matrix配置展开后生成 12 个Job实例：
+1. build (ubuntu-latest, python-3.9) - Linux + Python 3.9
+2. build (ubuntu-latest, python-3.10) - Linux + Python 3.10
+3. build (ubuntu-latest, python-3.11) - Linux + Python 3.11
+4. build (windows-latest, python-3.9) - Windows + Python 3.9
+5. build (windows-latest, python-3.10) - Windows + Python 3.10
+6. build (windows-latest, python-3.11) - Windows + Python 3.11
+... (必须列出所有变体)
+```
+
 ### 5. 脚本和Action索引
 - 按目录组织
 - 用途说明

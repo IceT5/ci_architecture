@@ -371,34 +371,68 @@ class CIDataExtractor:
         return steps
     
     def _expand_matrix(self, matrix: Dict) -> List[Dict[str, Any]]:
-        """Expand matrix to list of configurations."""
+        """Expand matrix to list of all possible configurations.
+        
+        This method expands the matrix to show ALL possible job combinations,
+        which is critical for understanding the full CI/CD pipeline.
+        """
+        import itertools
+        
         configs = []
         
         if not isinstance(matrix, dict):
             return configs
         
-        # Handle include
+        # Handle include first - these are explicit configurations
         includes = matrix.get("include", [])
         if includes:
             for item in includes:
                 if isinstance(item, dict):
                     configs.append(item)
         
-        # Simple matrix expansion (limited)
-        exclude = matrix.get("exclude", [])
-        
-        # Get all dimension keys
+        # Get all dimension keys (excluding include and exclude)
         dimension_keys = [k for k in matrix.keys() if k not in ["include", "exclude"]]
         
+        # Get exclude patterns
+        excludes = matrix.get("exclude", [])
+        
         if dimension_keys:
-            # For simple cases, just record the dimensions
+            # Build dimension value lists
+            dimension_values = {}
             for key in dimension_keys:
                 values = matrix.get(key, [])
-                if isinstance(values, list):
-                    for val in values:
-                        configs.append({key: val})
+                if isinstance(values, list) and values:
+                    dimension_values[key] = values
+                elif isinstance(values, str):
+                    # Handle string references like ${{ fromJson(...) }}
+                    dimension_values[key] = [f"<from-expression:{values[:50]}>"]
+            
+            # Generate all combinations
+            if dimension_values:
+                keys = list(dimension_values.keys())
+                value_lists = [dimension_values[k] for k in keys]
+                
+                for combo in itertools.product(*value_lists):
+                    config = dict(zip(keys, combo))
+                    
+                    # Check if this config is excluded
+                    is_excluded = False
+                    for exclude_pattern in excludes:
+                        if isinstance(exclude_pattern, dict):
+                            # Check if all exclude conditions match
+                            match = True
+                            for k, v in exclude_pattern.items():
+                                if config.get(k) != v:
+                                    match = False
+                                    break
+                            if match:
+                                is_excluded = True
+                                break
+                    
+                    if not is_excluded:
+                        configs.append(config)
         
-        return configs[:50]  # Limit number of configs
+        return configs  # Return ALL configs, no limit
     
     def _extract_action(self, action_dir: Path) -> Optional[ActionData]:
         """Extract detailed action data."""
