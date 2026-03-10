@@ -94,32 +94,44 @@ python ci_data_extractor.py /path/to/repo ci_data.json
 - Action使用统计
 - **Pre-commit配置**（.pre-commit-config.yaml）及其Hook列表
 
-### 第二步：生成Prompt
+### 第二步：生成Prompt（必须判断项目大小）
 
-**对于小型项目（≤20个工作流）：**
+**⚠️ 必须先检查工作流数量，然后选择正确的命令！**
 
+**步骤2.1：检查工作流数量**
+
+首先读取 `ci_data.json`，检查 `workflows` 对象中的工作流数量：
 ```bash
-# 方法一：直接输出到文件（推荐）
-python ci_diagram_generator.py prompt ci_data.json prompt.txt
-
-# 方法二：重定向输出
-python ci_diagram_generator.py prompt ci_data.json > prompt.txt
+# 查看工作流数量
+python -c "import json; d=json.load(open('ci_data.json')); print(f'工作流数量: {len(d.get(\"workflows\", {}))}')"
 ```
 
-**对于大型项目（>20个工作流）：**
+**步骤2.2：根据数量选择命令**
+
+| 工作流数量 | 命令 | 输出 |
+|-----------|------|------|
+| ≤20个 | `prompt` | 单个 prompt.txt |
+| >20个 | `split` | 多个 prompt_main.txt, prompt_1.txt, ... |
+
+**小型项目（≤20个工作流）：**
+
+```bash
+python ci_diagram_generator.py prompt ci_data.json prompt.txt
+```
+
+**大型项目（>20个工作流）：**
 
 ```bash
 # 使用split命令自动分割为多个prompt文件
-python ci_diagram_generator.py split ci_data.json ./prompts/ [每批工作流数量]
-
-# 示例：每批10个工作流
 python ci_diagram_generator.py split ci_data.json ./prompts/ 10
-```
 
-这会生成多个文件：
-- `prompt_main.txt` - 概览文档（项目信息、完整调用关系图、所有工作流列表）
-- `prompt_1.txt`, `prompt_2.txt`, ... - 详细文档批次（每批包含完整调用关系图+当前批次详情）
-- `README.txt` - 使用说明
+# 这会生成：
+# - ./prompts/prompt_main.txt - 概览文档
+# - ./prompts/prompt_1.txt - 第1批工作流详情
+# - ./prompts/prompt_2.txt - 第2批工作流详情
+# - ...
+# - ./prompts/README.txt - 使用说明
+```
 
 **分割策略：**
 - 每个批次prompt都包含完整的调用关系图
@@ -216,6 +228,8 @@ python ci_diagram_generator.py diagram ci_data.json llm_response.md CI_ARCHITECT
 
 ### 执行流程图
 
+**小型项目流程（≤20个工作流）：**
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  第一步：python ci_data_extractor.py /repo ci_data.json        │
@@ -223,17 +237,46 @@ python ci_diagram_generator.py diagram ci_data.json llm_response.md CI_ARCHITECT
 └─────────────────────────────────────────────────────────────────┘
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  第二步：python ci_diagram_generator.py prompt ci_data.json prompt.txt │
+│  第二步：检查工作流数量 ≤ 20                                     │
+│  执行：python ci_diagram_generator.py prompt ci_data.json prompt.txt │
 │  输出：prompt.txt                                                │
 └─────────────────────────────────────────────────────────────────┘
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  第三步：完整读取prompt.txt → 发送给LLM → 保存响应              │
+│  第三步：读取prompt.txt → 发送给LLM → 保存llm_response.md       │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第四步：python ci_diagram_generator.py diagram ...             │
+│  输出：CI_ARCHITECTURE.md                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**大型项目流程（>20个工作流）：**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  第一步：python ci_data_extractor.py /repo ci_data.json        │
+│  输出：ci_data.json                                              │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第二步：检查工作流数量 > 20                                     │
+│  执行：python ci_diagram_generator.py split ci_data.json ./prompts/ │
+│  输出：                                                          │
+│    - ./prompts/prompt_main.txt (概览)                           │
+│    - ./prompts/prompt_1.txt (批次1)                             │
+│    - ./prompts/prompt_2.txt (批次2)                             │
+│    - ./prompts/README.txt (说明)                                │
+└─────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  第三步：并行处理各批次prompt                                    │
 │                                                                  │
-│  大型项目处理方式：                                               │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
 │  │ Subagent 1   │  │ Subagent 2   │  │ Subagent 3   │ (并行)    │
-│  │ 入口工作流   │  │ 构建工作流   │  │ 测试工作流   │          │
+│  │ prompt_main  │  │ prompt_1     │  │ prompt_2     │          │
+│  │ → 概览文档   │  │ → 批次1详情  │  │ → 批次2详情  │          │
 │  └──────────────┘  └──────────────┘  └──────────────┘          │
 │           ↓              ↓              ↓                       │
 │           └──────────────┴──────────────┘                       │
@@ -242,8 +285,7 @@ python ci_diagram_generator.py diagram ci_data.json llm_response.md CI_ARCHITECT
 └─────────────────────────────────────────────────────────────────┘
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  第四步：python ci_diagram_generator.py diagram ci_data.json    │
-│          llm_response.md CI_ARCHITECTURE.md                     │
+│  第四步：python ci_diagram_generator.py diagram ...             │
 │  输出：CI_ARCHITECTURE.md                                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
