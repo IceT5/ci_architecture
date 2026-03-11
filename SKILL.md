@@ -4,11 +4,45 @@ description: |
   Analyzes GitHub Actions CI/CD architecture with LLM-powered classification and understanding.
   
   TRIGGERS: "Analyze ci/cd", "Analyze workflow", "CI architecture", "Test infrastructure", "CI/CD diagram"
+  
+  IMPORTANT: Python scripts are located in the SAME DIRECTORY as this SKILL.md file.
+  When executing commands, you MUST first locate the directory containing SKILL.md
+  and use that path for running Python scripts.
 ---
 
 # CI Architecture Analysis Skill
 
 分析GitHub Actions CI/CD架构，使用LLM进行智能分类和理解。
+
+## ⚠️ 重要：脚本位置说明
+
+**Python脚本位于SKILL.md同级目录中！**
+
+在执行任何Python命令之前，必须：
+
+1. **找到SKILL.md所在的目录** - 这是脚本的正确位置
+2. **使用该目录路径执行命令** - 不能假设脚本在当前工作目录
+
+**正确示例：**
+```bash
+# 假设SKILL.md位于 /path/to/skill/CI_Architecture/SKILL.md
+# 则脚本也在 /path/to/skill/CI_Architecture/ 目录下
+
+cd /path/to/skill/CI_Architecture
+python ci_data_extractor.py /path/to/target/repo ci_data.json
+```
+
+**错误示例：**
+```bash
+# 错误：在目标仓库目录下执行（找不到脚本）
+cd /path/to/target/repo
+python ci_data_extractor.py . ci_data.json  # ❌ 找不到脚本！
+```
+
+**脚本文件列表（与SKILL.md同级）：**
+- `ci_data_extractor.py` - 数据提取脚本
+- `ci_diagram_generator.py` - Prompt生成和结果保存脚本
+- `analyze_ci_architecture.py` - 旧版分析器（已弃用）
 
 ## 设计理念
 

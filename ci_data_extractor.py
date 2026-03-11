@@ -29,6 +29,8 @@ class StepData:
     if_condition: str = ""
     continue_on_error: bool = False
     timeout_minutes: int = 0
+    working_directory: str = ""
+    shell: str = ""
 
 
 @dataclass
@@ -83,6 +85,15 @@ class ActionData:
 
 
 @dataclass
+class ScriptCallRelation:
+    """Script call relationship."""
+    caller_script: str = ""
+    called_script: str = ""
+    call_type: str = ""  # source, import, subprocess, etc.
+    line_number: int = 0
+
+
+@dataclass
 class ScriptData:
     """Detailed script data."""
     name: str
@@ -92,6 +103,8 @@ class ScriptData:
     functions: List[str] = field(default_factory=list)
     imports: List[str] = field(default_factory=list)
     called_by: List[str] = field(default_factory=list)  # Which workflows use this
+    calls_scripts: List[str] = field(default_factory=list)  # Scripts this script calls
+    call_relations: List[ScriptCallRelation] = field(default_factory=list)  # Detailed call info
 
 
 @dataclass
@@ -120,6 +133,15 @@ class PreCommitConfigData:
 
 
 @dataclass
+class OtherCIConfigData:
+    """Other CI system configuration data."""
+    system: str = ""  # circleci, gitlab_ci, azure_pipelines, etc.
+    path: str = ""
+    content: str = ""
+    parsed_data: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class CIData:
     """Complete CI/CD raw data for LLM analysis."""
     repo_name: str
@@ -128,6 +150,7 @@ class CIData:
     actions: List[ActionData] = field(default_factory=list)
     scripts: List[ScriptData] = field(default_factory=list)
     pre_commit_configs: List[PreCommitConfigData] = field(default_factory=list)  # pre-commit configs
+    other_ci_configs: List[OtherCIConfigData] = field(default_factory=list)  # CircleCI, GitLab CI, etc.
     # Raw relationship data
     workflow_call_graph: Dict[str, List[str]] = field(default_factory=dict)
     job_dependency_graph: Dict[str, List[str]] = field(default_factory=dict)
@@ -182,6 +205,9 @@ class CIDataExtractor:
         
         # Extract pre-commit configurations
         data.pre_commit_configs = self._extract_pre_commit_configs()
+        
+        # Extract other CI system configurations (CircleCI, GitLab CI, etc.)
+        data.other_ci_configs = self._extract_other_ci_configs()
         
         # Build relationship graphs
         self._build_relationships(data)
@@ -360,12 +386,14 @@ class CIDataExtractor:
                 name=step.get("name", ""),
                 id=step.get("id", ""),
                 uses=step.get("uses", ""),
-                run=step.get("run", ""),
+                run=step.get("run", ""),  # Keep full content, no truncation
                 with_params=with_params if isinstance(with_params, dict) else {},
                 env=env if isinstance(env, dict) else {},
                 if_condition=str(step.get("if", "")),
                 continue_on_error=step.get("continue-on-error", False),
-                timeout_minutes=step.get("timeout-minutes", 0)
+                timeout_minutes=step.get("timeout-minutes", 0),
+                working_directory=step.get("working-directory", ""),
+                shell=step.get("shell", "")
             ))
         
         return steps
@@ -375,10 +403,14 @@ class CIDataExtractor:
         
         This method expands the matrix to show ALL possible job combinations,
         which is critical for understanding the full CI/CD pipeline.
+        
+        For dynamic matrices (fromJson, fromJSON, expressions), we preserve
+        the full expression for LLM analysis instead of truncating.
         """
         import itertools
         
         configs = []
+        dynamic_expressions = {}  # Track dynamic expressions for LLM analysis
         
         if not isinstance(matrix, dict):
             return configs
@@ -402,10 +434,26 @@ class CIDataExtractor:
             for key in dimension_keys:
                 values = matrix.get(key, [])
                 if isinstance(values, list) and values:
-                    dimension_values[key] = values
+                    # Check for dynamic expressions in list items
+                    processed_values = []
+                    for v in values:
+                        if isinstance(v, str) and v.startswith("${{"):
+                            # Preserve full dynamic expression
+                            processed_values.append(v)
+                            dynamic_expressions[f"{key}::{v[:30]}..."] = v
+                        else:
+                            processed_values.append(v)
+                    dimension_values[key] = processed_values
                 elif isinstance(values, str):
                     # Handle string references like ${{ fromJson(...) }}
-                    dimension_values[key] = [f"<from-expression:{values[:50]}>"]
+                    # Preserve FULL expression for LLM analysis (no truncation)
+                    full_expr = values
+                    if "${{" in full_expr:
+                        dynamic_expressions[key] = full_expr
+                        # Mark as dynamic - LLM should analyze
+                        dimension_values[key] = [f"<DYNAMIC_EXPRESSION>{full_expr}</DYNAMIC_EXPRESSION>"]
+                    else:
+                        dimension_values[key] = [values]
             
             # Generate all combinations
             if dimension_values:
@@ -431,6 +479,15 @@ class CIDataExtractor:
                     
                     if not is_excluded:
                         configs.append(config)
+        
+        # If we found dynamic expressions, add metadata for LLM analysis
+        if dynamic_expressions and configs:
+            # Add a special config entry with dynamic expression info
+            for config in configs:
+                if "<DYNAMIC_EXPRESSION>" in str(config.values()):
+                    # Add metadata about dynamic nature
+                    config["_dynamic_expressions"] = dynamic_expressions
+                    config["_note"] = "Matrix contains dynamic expressions - analyze parent workflow for actual values"
         
         return configs  # Return ALL configs, no limit
     
@@ -492,10 +549,11 @@ class CIDataExtractor:
             return None
     
     def _extract_scripts(self, ci_dirs: Dict[str, Path]) -> Tuple[List[ScriptData], Dict[str, List[str]]]:
-        """Extract script information with directory mapping."""
+        """Extract script information with directory mapping and nested call tracking."""
         scripts = []
         scripts_by_dir = defaultdict(list)
-        seen = set()
+        seen = {}  # name -> ScriptData (for lookup)
+        script_paths = {}  # name -> full path (for resolution)
         
         for dir_key, path in ci_dirs.items():
             if not isinstance(path, Path) or not path.exists():
@@ -504,12 +562,11 @@ class CIDataExtractor:
             for ext in ["*.sh", "*.py", "*.ps1", "*.bat"]:
                 for f in path.rglob(ext):
                     if f.name not in seen:
-                        seen.add(f.name)
                         try:
                             with open(f, "r", encoding="utf-8", errors="ignore") as fp:
                                 content = fp.read()
                             
-                            # Extract functions (for Python and Shell)
+                            # Extract functions and imports
                             functions = []
                             imports = []
                             if f.suffix == ".py":
@@ -525,11 +582,13 @@ class CIDataExtractor:
                                 name=f.name,
                                 path=str(f.relative_to(self.repo_path)),
                                 type=f.suffix,
-                                content=content[:5000],  # Limit content
+                                content=content,  # No truncation, keep full content
                                 functions=functions,
                                 imports=imports
                             )
                             scripts.append(script)
+                            seen[f.name] = script
+                            script_paths[f.name] = f
                             
                             # Map to directory
                             rel_dir = str(f.parent.relative_to(self.repo_path))
@@ -538,7 +597,167 @@ class CIDataExtractor:
                         except Exception as e:
                             pass
         
-        return scripts[:100], dict(scripts_by_dir)  # Limit
+        # Now analyze nested script calls
+        self._analyze_script_calls(scripts, script_paths)
+        
+        return scripts, dict(scripts_by_dir)  # No limit on scripts
+    
+    def _analyze_script_calls(self, scripts: List[ScriptData], script_paths: Dict[str, Path]):
+        """Analyze nested script calls within each script."""
+        script_names = set(script_paths.keys())
+        
+        for script in scripts:
+            content = script.content
+            lines = content.split('\n')
+            
+            if script.type == ".sh":
+                # Shell script: source, ., ./script.sh, bash script.sh
+                for i, line in enumerate(lines, 1):
+                    line_stripped = line.strip()
+                    
+                    # Skip comments
+                    if line_stripped.startswith('#'):
+                        continue
+                    
+                    # source or . command
+                    source_match = re.match(r'^(?:source|\.)\s+(.+?)(?:\s|$)', line_stripped)
+                    if source_match:
+                        called = source_match.group(1).strip('"\'')
+                        # Resolve the called script name
+                        called_name = Path(called).name
+                        if called_name in script_names and called_name != script.name:
+                            script.calls_scripts.append(called_name)
+                            script.call_relations.append(ScriptCallRelation(
+                                caller_script=script.name,
+                                called_script=called_name,
+                                call_type="source",
+                                line_number=i
+                            ))
+                    
+                    # Direct script execution: ./script.sh, bash script.sh, sh script.sh
+                    exec_match = re.match(r'^(?:bash|sh|zsh|\.\/)\s*(.+?)(?:\s|$)', line_stripped)
+                    if exec_match:
+                        called = exec_match.group(1).strip('"\'')
+                        if called.startswith('./'):
+                            called = called[2:]
+                        called_name = Path(called).name
+                        if called_name in script_names and called_name != script.name:
+                            script.calls_scripts.append(called_name)
+                            script.call_relations.append(ScriptCallRelation(
+                                caller_script=script.name,
+                                called_script=called_name,
+                                call_type="execute",
+                                line_number=i
+                            ))
+            
+            elif script.type == ".py":
+                # Python: import, from, subprocess, os.system, os.popen
+                for i, line in enumerate(lines, 1):
+                    line_stripped = line.strip()
+                    
+                    # Skip comments
+                    if line_stripped.startswith('#'):
+                        continue
+                    
+                    # import module (local modules)
+                    import_match = re.match(r'^import\s+(\w+)', line_stripped)
+                    if import_match:
+                        module_name = import_match.group(1)
+                        # Check if it's a local .py file
+                        called_name = f"{module_name}.py"
+                        if called_name in script_names and called_name != script.name:
+                            script.calls_scripts.append(called_name)
+                            script.call_relations.append(ScriptCallRelation(
+                                caller_script=script.name,
+                                called_script=called_name,
+                                call_type="import",
+                                line_number=i
+                            ))
+                    
+                    # from module import ...
+                    from_match = re.match(r'^from\s+(\w+)', line_stripped)
+                    if from_match:
+                        module_name = from_match.group(1)
+                        called_name = f"{module_name}.py"
+                        if called_name in script_names and called_name != script.name:
+                            script.calls_scripts.append(called_name)
+                            script.call_relations.append(ScriptCallRelation(
+                                caller_script=script.name,
+                                called_script=called_name,
+                                call_type="from_import",
+                                line_number=i
+                            ))
+                    
+                    # subprocess.run/call/Popen with script
+                    subprocess_patterns = [
+                        r'subprocess\.(?:run|call|Popen)\s*\(\s*["\']([^"\']+\.sh)["\']',
+                        r'subprocess\.(?:run|call|Popen)\s*\(\s*\[["\']([^"\']+\.sh)["\']',
+                        r'os\.system\s*\(\s*["\']([^"\']+\.sh)["\']',
+                        r'os\.popen\s*\(\s*["\']([^"\']+\.sh)["\']',
+                    ]
+                    for pattern in subprocess_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            called = match.group(1)
+                            called_name = Path(called).name
+                            if called_name in script_names and called_name != script.name:
+                                script.calls_scripts.append(called_name)
+                                script.call_relations.append(ScriptCallRelation(
+                                    caller_script=script.name,
+                                    called_script=called_name,
+                                    call_type="subprocess",
+                                    line_number=i
+                                ))
+            
+            elif script.type == ".ps1":
+                # PowerShell: .\script.ps1, & ".\script.ps1", . source.ps1
+                for i, line in enumerate(lines, 1):
+                    line_stripped = line.strip()
+                    
+                    if line_stripped.startswith('#'):
+                        continue
+                    
+                    # .\script.ps1 or & ".\script.ps1"
+                    ps_patterns = [
+                        r'\.\s*[\\/]?([^\\/\s]+\.ps1)',
+                        r'&\s*["\']?[.\\/]*([^"\'\\/\s]+\.ps1)',
+                    ]
+                    for pattern in ps_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            called_name = match.group(1)
+                            if called_name in script_names and called_name != script.name:
+                                script.calls_scripts.append(called_name)
+                                script.call_relations.append(ScriptCallRelation(
+                                    caller_script=script.name,
+                                    called_script=called_name,
+                                    call_type="dot_source",
+                                    line_number=i
+                                ))
+            
+            elif script.type == ".bat":
+                # Batch: call script.bat, script.bat
+                for i, line in enumerate(lines, 1):
+                    line_stripped = line.strip()
+                    
+                    if line_stripped.startswith('::') or line_stripped.startswith('REM'):
+                        continue
+                    
+                    # call script.bat or direct script.bat
+                    bat_match = re.match(r'(?:call\s+)?([^\s]+\.bat)', line_stripped, re.IGNORECASE)
+                    if bat_match:
+                        called_name = bat_match.group(1)
+                        if called_name in script_names and called_name != script.name:
+                            script.calls_scripts.append(called_name)
+                            script.call_relations.append(ScriptCallRelation(
+                                caller_script=script.name,
+                                called_script=called_name,
+                                call_type="call",
+                                line_number=i
+                            ))
+            
+            # Remove duplicates
+            script.calls_scripts = list(set(script.calls_scripts))
     
     def _extract_pre_commit_configs(self) -> List[PreCommitConfigData]:
         """Extract pre-commit configuration from .pre-commit-config.yaml files."""
@@ -608,6 +827,108 @@ class CIDataExtractor:
                 
             except Exception as e:
                 print(f"Error parsing pre-commit config {config_path}: {e}", file=sys.stderr)
+        
+        return configs
+    
+    def _extract_other_ci_configs(self) -> List[OtherCIConfigData]:
+        """Extract other CI system configurations (CircleCI, GitLab CI, Azure Pipelines, etc.)."""
+        configs = []
+        
+        # Define CI config file patterns
+        ci_config_patterns = [
+            # CircleCI
+            (".circleci/config.yml", "circleci"),
+            (".circleci/config.yaml", "circleci"),
+            # GitLab CI
+            (".gitlab-ci.yml", "gitlab_ci"),
+            (".gitlab-ci.yaml", "gitlab_ci"),
+            # Azure Pipelines
+            ("azure-pipelines.yml", "azure_pipelines"),
+            ("azure-pipelines.yaml", "azure_pipelines"),
+            (".azure-pipelines.yml", "azure_pipelines"),
+            (".azure-pipelines.yaml", "azure_pipelines"),
+            # Jenkins
+            ("Jenkinsfile", "jenkins"),
+            ("jenkins/Jenkinsfile", "jenkins"),
+            # Travis CI
+            (".travis.yml", "travis_ci"),
+            (".travis.yaml", "travis_ci"),
+            # AppVeyor
+            (".appveyor.yml", "appveyor"),
+            (".appveyor.yaml", "appveyor"),
+            # Bitbucket Pipelines
+            ("bitbucket-pipelines.yml", "bitbucket_pipelines"),
+            ("bitbucket-pipelines.yaml", "bitbucket_pipelines"),
+            # Buildkite
+            ("buildkite.yml", "buildkite"),
+            ("buildkite.yaml", "buildkite"),
+            (".buildkite/pipeline.yml", "buildkite"),
+            # Drone CI
+            (".drone.yml", "drone_ci"),
+            (".drone.yaml", "drone_ci"),
+            # .ci directory
+            (".ci/config.yml", "ci_dir"),
+            (".ci/config.yaml", "ci_dir"),
+            (".ci/pipeline.yml", "ci_dir"),
+            (".ci/pipeline.yaml", "ci_dir"),
+            # Makefile (common for build automation)
+            ("Makefile", "makefile"),
+            # Tox
+            ("tox.ini", "tox"),
+            # pyproject.toml (may contain CI-related configs)
+            ("pyproject.toml", "pyproject"),
+        ]
+        
+        for pattern, system in ci_config_patterns:
+            config_path = self.repo_path / pattern
+            if not config_path.exists():
+                continue
+            
+            try:
+                with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                
+                parsed_data = {}
+                
+                # Parse YAML files
+                if pattern.endswith((".yml", ".yaml")):
+                    try:
+                        parsed_data = yaml.safe_load(content) or {}
+                    except:
+                        pass
+                # Parse INI files
+                elif pattern.endswith(".ini"):
+                    try:
+                        import configparser
+                        parser = configparser.ConfigParser()
+                        parser.read_string(content)
+                        for section in parser.sections():
+                            parsed_data[section] = dict(parser.items(section))
+                    except:
+                        pass
+                # Parse TOML files
+                elif pattern.endswith(".toml"):
+                    try:
+                        import tomllib
+                        parsed_data = tomllib.loads(content)
+                    except ImportError:
+                        # Fallback for older Python versions
+                        try:
+                            import toml
+                            parsed_data = toml.loads(content)
+                        except:
+                            pass
+                
+                config = OtherCIConfigData(
+                    system=system,
+                    path=str(config_path.relative_to(self.repo_path)),
+                    content=content,  # Full content
+                    parsed_data=parsed_data
+                )
+                configs.append(config)
+                
+            except Exception as e:
+                print(f"Error parsing CI config {config_path}: {e}", file=sys.stderr)
         
         return configs
     
@@ -703,9 +1024,11 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
                             "name": step.name,
                             "id": step.id,
                             "uses": step.uses,
-                            "run": step.run[:500] if step.run else "",  # Limit
+                            "run": step.run,  # Full content, no truncation
                             "with_params": step.with_params,
                             "env": step.env,
+                            "working_directory": step.working_directory,
+                            "shell": step.shell,
                         }
                         for step in job.steps
                     ],
@@ -730,7 +1053,7 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
             "used_by": action.used_by,
         })
     
-    # Convert scripts
+    # Convert scripts with nested call information
     for script in data.scripts:
         result["scripts"].append({
             "name": script.name,
@@ -738,8 +1061,33 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
             "type": script.type,
             "functions": script.functions,
             "imports": script.imports,
-            "content_preview": script.content[:1500],  # Limit
+            "content": script.content,  # Full content, no truncation
             "called_by": script.called_by,
+            "calls_scripts": script.calls_scripts,  # Scripts this script calls
+            "call_relations": [
+                {
+                    "called_script": rel.called_script,
+                    "call_type": rel.call_type,
+                    "line_number": rel.line_number,
+                }
+                for rel in script.call_relations
+            ],
+        })
+    
+    # Add script call graph for nested script analysis
+    result["script_call_graph"] = {}
+    for script in data.scripts:
+        if script.calls_scripts:
+            result["script_call_graph"][script.name] = script.calls_scripts
+    
+    # Convert other CI configs
+    result["other_ci_configs"] = []
+    for ci_config in data.other_ci_configs:
+        result["other_ci_configs"].append({
+            "system": ci_config.system,
+            "path": ci_config.path,
+            "content": ci_config.content,  # Full content for LLM analysis
+            "parsed_data": ci_config.parsed_data,
         })
     
     # Convert pre-commit configs

@@ -11,5 +11,7 @@
     "job_dependencies": {},
     "action_usages": {}
   },
+  "script_call_graph": {},
+  "other_ci_configs": [],
   "pre_commit_configs": []
 }
