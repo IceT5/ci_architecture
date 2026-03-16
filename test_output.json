@@ -1,0 +1,17 @@
+{
+  "repo_name": "ci_architecture",
+  "repo_path": "F:\\code\\skills\\ci_architecture",
+  "ci_directories": [],
+  "workflows": {},
+  "actions": [],
+  "scripts": [],
+  "scripts_by_directory": {},
+  "relationships": {
+    "workflow_calls": {},
+    "job_dependencies": {},
+    "action_usages": {}
+  },
+  "script_call_graph": {},
+  "other_ci_configs": [],
+  "pre_commit_configs": []
+}
