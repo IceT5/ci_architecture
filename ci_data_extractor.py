@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+#
+# Copyright (c) 2026 IceT5. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 """
 CI Data Extractor - Extract comprehensive raw CI/CD data without classification
 
@@ -55,6 +70,22 @@ class JobData:
 
 
 @dataclass
+class WorkflowCallInput:
+    """Input definition for reusable workflow (workflow_call)."""
+    description: str = ""
+    required: bool = False
+    default: Any = None
+    type: str = ""  # string, boolean, number, etc.
+
+
+@dataclass
+class WorkflowCallOutput:
+    """Output definition for reusable workflow (workflow_call)."""
+    description: str = ""
+    value: str = ""
+
+
+@dataclass
 class WorkflowData:
     """Detailed workflow data without classification."""
     filename: str
@@ -68,6 +99,12 @@ class WorkflowData:
     raw_content: str = ""  # Full content for LLM context
     # Relationships
     callers: List[str] = field(default_factory=list)  # Who calls this workflow
+    # Reusable workflow support (workflow_call trigger)
+    is_reusable: bool = False  # Whether this workflow can be called by other workflows
+    workflow_call_inputs: Dict[str, WorkflowCallInput] = field(default_factory=dict)
+    workflow_call_outputs: Dict[str, WorkflowCallOutput] = field(default_factory=dict)
+    # Called by which workflows
+    called_by_workflows: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -209,10 +246,102 @@ class CIDataExtractor:
         # Extract other CI system configurations (CircleCI, GitLab CI, etc.)
         data.other_ci_configs = self._extract_other_ci_configs()
         
+        # Resolve nested workflow calls (parse unreferenced yml files)
+        self._resolve_nested_workflows(data, ci_dirs)
+        
         # Build relationship graphs
         self._build_relationships(data)
         
         return data
+    
+    def _resolve_nested_workflows(self, data: CIData, ci_dirs: Dict[str, Path]):
+        """Resolve nested workflow calls - parse unreferenced yml files.
+        
+        This method handles two scenarios:
+        1. Reusable workflow already parsed - just link the relationship
+        2. Reusable workflow not parsed - parse it and add to data
+        """
+        workflows_dir = ci_dirs.get("github_workflows")
+        if not workflows_dir:
+            return
+        
+        # Track all workflow files we've already parsed
+        parsed_files = set(data.workflows.keys())
+        
+        # Find all workflow calls that reference local files
+        all_called_workflows = set()
+        for wf_name, wf in data.workflows.items():
+            for job_name, job in wf.jobs.items():
+                for called_wf in job.calls_workflows:
+                    # Only process local workflow references
+                    if called_wf.startswith("./.github/workflows/") or called_wf.startswith(".github/workflows/"):
+                        all_called_workflows.add(called_wf)
+                    elif called_wf.startswith("./"):
+                        # Other relative paths
+                        all_called_workflows.add(called_wf)
+        
+        # Process each called workflow
+        for called_wf_path in all_called_workflows:
+            # Normalize the path to get filename
+            wf_filename = self._normalize_workflow_path(called_wf_path)
+            
+            if wf_filename in parsed_files:
+                # Case 1: Already parsed - just link relationship
+                if wf_filename in data.workflows:
+                    # Mark as reusable workflow if not already marked
+                    data.workflows[wf_filename].called_by_workflows.append(called_wf_path)
+            else:
+                # Case 2: Not parsed - need to parse it
+                wf_full_path = self._resolve_workflow_path(called_wf_path, workflows_dir)
+                if wf_full_path and wf_full_path.exists():
+                    wf_data = self._extract_workflow(wf_full_path)
+                    if wf_data:
+                        wf_data.called_by_workflows.append(called_wf_path)
+                        data.workflows[wf_filename] = wf_data
+                        parsed_files.add(wf_filename)
+                        print(f"Parsed nested workflow: {wf_filename}", file=sys.stderr)
+    
+    def _normalize_workflow_path(self, path: str) -> str:
+        """Normalize workflow path to get filename."""
+        # Handle various path formats
+        # ./.github/workflows/reusable.yml -> reusable.yml
+        # .github/workflows/reusable.yml -> reusable.yml
+        # ./subdir/workflow.yml -> workflow.yml
+        path = path.replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
+        # Get just the filename
+        return Path(path).name
+    
+    def _resolve_workflow_path(self, called_path: str, workflows_dir: Path) -> Optional[Path]:
+        """Resolve the full path of a called workflow."""
+        called_path = called_path.replace("\\", "/")
+        
+        # Try different path resolutions
+        possible_paths = []
+        
+        if called_path.startswith("./.github/workflows/"):
+            # ./.github/workflows/reusable.yml
+            filename = called_path.replace("./.github/workflows/", "")
+            possible_paths.append(self.repo_path / ".github" / "workflows" / filename)
+        elif called_path.startswith(".github/workflows/"):
+            # .github/workflows/reusable.yml
+            filename = called_path.replace(".github/workflows/", "")
+            possible_paths.append(self.repo_path / ".github" / "workflows" / filename)
+        elif called_path.startswith("./"):
+            # Relative to repo root
+            possible_paths.append(self.repo_path / called_path[2:])
+        else:
+            # Just filename - look in workflows dir
+            possible_paths.append(workflows_dir / called_path)
+            # Also try as relative path
+            possible_paths.append(self.repo_path / called_path)
+        
+        for path in possible_paths:
+            if path.exists():
+                return path
+        
+        return None
     
     def _find_ci_directories(self) -> Dict[str, Path]:
         """Find all CI-related directories."""
@@ -264,6 +393,37 @@ class CIDataExtractor:
             if isinstance(concurrency, str):
                 concurrency = {"group": concurrency}
             
+            # Extract workflow_call info (for reusable workflows)
+            is_reusable = False
+            workflow_call_inputs = {}
+            workflow_call_outputs = {}
+            
+            on_config = wf_data.get("on", {})
+            if isinstance(on_config, dict) and "workflow_call" in on_config:
+                is_reusable = True
+                workflow_call_config = on_config["workflow_call"]
+                if isinstance(workflow_call_config, dict):
+                    # Extract inputs
+                    inputs_config = workflow_call_config.get("inputs", {})
+                    if isinstance(inputs_config, dict):
+                        for input_name, input_data in inputs_config.items():
+                            if isinstance(input_data, dict):
+                                workflow_call_inputs[input_name] = WorkflowCallInput(
+                                    description=input_data.get("description", ""),
+                                    required=input_data.get("required", False),
+                                    default=input_data.get("default"),
+                                    type=input_data.get("type", "")
+                                )
+                    # Extract outputs
+                    outputs_config = workflow_call_config.get("outputs", {})
+                    if isinstance(outputs_config, dict):
+                        for output_name, output_data in outputs_config.items():
+                            if isinstance(output_data, dict):
+                                workflow_call_outputs[output_name] = WorkflowCallOutput(
+                                    description=output_data.get("description", ""),
+                                    value=output_data.get("value", "")
+                                )
+            
             return WorkflowData(
                 filename=filepath.name,
                 name=wf_data.get("name", filepath.stem),
@@ -273,7 +433,10 @@ class CIDataExtractor:
                 jobs=jobs,
                 env_vars=env_vars if isinstance(env_vars, dict) else {},
                 concurrency=concurrency if isinstance(concurrency, dict) else {},
-                raw_content=content
+                raw_content=content,
+                is_reusable=is_reusable,
+                workflow_call_inputs=workflow_call_inputs,
+                workflow_call_outputs=workflow_call_outputs
             )
         except Exception as e:
             print(f"Error parsing {filepath}: {e}", file=sys.stderr)
@@ -934,14 +1097,32 @@ class CIDataExtractor:
     
     def _build_relationships(self, data: CIData):
         """Build relationship graphs from extracted data."""
-        # Workflow call graph
+        # Build workflow filename lookup for resolving calls
+        wf_filename_lookup = {}
         for wf_name, wf in data.workflows.items():
-            callers = []
+            wf_filename_lookup[wf_name] = wf_name
+            # Also map by path variants
+            wf_filename_lookup[f"./.github/workflows/{wf_name}"] = wf_name
+            wf_filename_lookup[f".github/workflows/{wf_name}"] = wf_name
+        
+        # Workflow call graph - track who calls whom
+        for wf_name, wf in data.workflows.items():
             for job_name, job in wf.jobs.items():
                 for called_wf in job.calls_workflows:
+                    # Normalize the called workflow path
+                    called_filename = self._normalize_workflow_path(called_wf)
+                    
+                    # Add to call graph
                     if called_wf not in data.workflow_call_graph:
                         data.workflow_call_graph[called_wf] = []
                     data.workflow_call_graph[called_wf].append(f"{wf_name}::{job_name}")
+                    
+                    # Update called_by_workflows for the target workflow
+                    if called_filename in data.workflows:
+                        target_wf = data.workflows[called_filename]
+                        caller_info = f"{wf_name}::{job_name}"
+                        if caller_info not in target_wf.called_by_workflows:
+                            target_wf.called_by_workflows.append(caller_info)
         
         # Job dependency graph
         for wf_name, wf in data.workflows.items():
@@ -1038,6 +1219,25 @@ def extract_to_json(repo_path: str, output_file: str = None) -> str:
                 for job_name, job in wf.jobs.items()
             },
             "callers": wf.callers,
+            # Reusable workflow support
+            "is_reusable": wf.is_reusable,
+            "workflow_call_inputs": {
+                input_name: {
+                    "description": inp.description,
+                    "required": inp.required,
+                    "default": inp.default,
+                    "type": inp.type,
+                }
+                for input_name, inp in wf.workflow_call_inputs.items()
+            },
+            "workflow_call_outputs": {
+                output_name: {
+                    "description": out.description,
+                    "value": out.value,
+                }
+                for output_name, out in wf.workflow_call_outputs.items()
+            },
+            "called_by_workflows": wf.called_by_workflows,
         }
     
     # Convert actions
